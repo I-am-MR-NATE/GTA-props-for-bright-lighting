@@ -1,0 +1,92 @@
+name: FLP Private Token Capability Probe 20260818
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.private-token-capability-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Generate one-time request key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/probe/pub" "$RUNNER_TEMP/probe/work" "$RUNNER_TEMP/probe/result"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/probe/request-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/probe/request-private.pem" -pubout -out "$RUNNER_TEMP/probe/pub/request-public.pem"
+          printf 'run_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$RUNNER_TEMP/probe/pub/KEY_RECEIPT.txt"
+
+      - name: Publish public key only
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-token-probe-public-key
+          path: ${{ runner.temp }}/probe/pub
+          retention-days: 1
+          compression-level: 1
+
+      - name: Wait for encrypted request
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -Eeuo pipefail
+          base="https://raw.githubusercontent.com/I-am-MR-NATE/GTA-props-for-bright-lighting/${HEAD_REF}"
+          for n in $(seq 1 120); do
+            if curl -fsSL "$base/private_probe_key.b64?nonce=$n" -o "$RUNNER_TEMP/probe/work/key.b64" && \
+               curl -fsSL "$base/private_probe_data.b64?nonce=$n" -o "$RUNNER_TEMP/probe/work/data.b64"; then
+              test -s "$RUNNER_TEMP/probe/work/key.b64" && test -s "$RUNNER_TEMP/probe/work/data.b64" && exit 0
+            fi
+            sleep 2
+          done
+          exit 2
+
+      - name: Test token forms without exposing content
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/probe/work"; R="$RUNNER_TEMP/probe/result"
+          base64 -d "$W/key.b64" > "$W/key.enc"
+          openssl pkeyutl -decrypt -inkey "$RUNNER_TEMP/probe/request-private.pem" -in "$W/key.enc" -out "$W/pass.txt" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          base64 -d "$W/data.b64" > "$W/data.enc"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$W/data.enc" -out "$W/request.json" -pass file:"$W/pass.txt"
+          python3 - "$W/request.json" "$R/report.json" <<'PY'
+          import json, pathlib, subprocess, sys, urllib.parse
+          req=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          token=req['token']
+          tests=[]
+          def run(name,url,header=None):
+              cmd=['curl','-sS','-L','-o','/dev/null','-w','%{http_code} %{size_download} %{content_type}', '--max-time','20']
+              if header: cmd += ['-H',header]
+              cmd += [url]
+              p=subprocess.run(cmd,text=True,capture_output=True)
+              tests.append({'name':name,'result':p.stdout.strip() if p.stdout else f'curl_rc={p.returncode}','curl_rc':p.returncode})
+          def q(url):
+              sep='&' if '?' in url else '?'
+              return url+sep+urllib.parse.urlencode({'token':token})
+          run('raw_as_is',req['raw_url'])
+          run('raw_bearer',req['raw_url'],f'Authorization: Bearer {token}')
+          run('contents_query',q(req['contents_url']))
+          run('git_blob_query',q(req['git_url']))
+          run('contents_bearer',req['contents_url'],f'Authorization: Bearer {token}')
+          run('git_blob_bearer',req['git_url'],f'Authorization: Bearer {token}')
+          run('contents_token_header',req['contents_url'],f'Authorization: token {token}')
+          run('repo_bearer',req['repo_url'],f'Authorization: Bearer {token}')
+          out={'schema':'mega-dan.private-token-capability.v1','tests':tests,'secret_material_emitted':False}
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(out,indent=2)+'\n')
+          PY
+          rm -f "$W/pass.txt" "$W/request.json" "$RUNNER_TEMP/probe/request-private.pem"
+
+      - name: Upload safe status report
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-token-capability-report
+          path: ${{ runner.temp }}/probe/result/report.json
+          retention-days: 1
+          compression-level: 1
