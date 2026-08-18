@@ -1,4 +1,4 @@
-name: FLP6 Wave1 Repair Ferry
+name: FLP6 Wave1 Wine LIEF Ferry
 
 on:
   pull_request:
@@ -11,93 +11,84 @@ permissions:
   contents: read
 
 jobs:
-  ghidra:
+  wine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Acquire exact Wine 11.0 source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$GITHUB_WORKSPACE/_closeout/wine"
+          mkdir -p "$root/source" "$root/receipt"
+          pin='db11d0fe6a169c457e23d007e20404643d067aa8'
+          git init -q "$root/repo"
+          git -C "$root/repo" remote add origin https://github.com/wine-mirror/wine.git
+          git -C "$root/repo" fetch -q --depth=1 origin "$pin"
+          git -C "$root/repo" checkout -q --detach FETCH_HEAD
+          actual="$(git -C "$root/repo" rev-parse HEAD)"
+          tree="$(git -C "$root/repo" rev-parse 'HEAD^{tree}')"
+          test "$actual" = "$pin"
+          git -C "$root/repo" archive --format=tar "$pin" | gzip -9 > "$root/source/wine-${pin}.tar.gz"
+          git -C "$root/repo" ls-tree -r --full-tree "$pin" > "$root/receipt/GIT_TREE.txt"
+          git -C "$root/repo" submodule status --recursive > "$root/receipt/SUBMODULE_STATUS.txt" 2>&1 || true
+          find "$root/repo" -maxdepth 2 -type f \( -iname 'license*' -o -iname 'copying*' \) -print | sort > "$root/receipt/LICENCE_FILES.txt"
+          sha256sum "$root/source"/* > "$root/receipt/SHA256SUMS.txt"
+          printf 'tool=wine\nversion=11.0\npin_sha=%s\nresolved_sha=%s\ntree_sha=%s\nrun_id=%s\n' "$pin" "$actual" "$tree" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
+          rm -rf "$root/repo"
+      - name: Upload Wine source custody
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp6-wave1-wine-source
+          path: _closeout/wine
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+  lief:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Acquire exact Ghidra source and release
+      - name: Acquire exact LIEF 1.0.0 source and canonical Windows asset
         shell: bash
         run: |
           set -Eeuo pipefail
-          root="$GITHUB_WORKSPACE/_repair/ghidra"
-          mkdir -p "$root/source" "$root/release" "$root/receipt" "$root/parts"
-          pin='c0f584bf229fffba61b36431f3ce30c0c3e4e682'
+          root="$GITHUB_WORKSPACE/_closeout/lief"
+          mkdir -p "$root/source" "$root/release/all" "$root/receipt"
+          pin='d05b3499b6934137e917c009a4df0a9dc8cb11c5'
+          expected='1ad0799a5e699505f7e4ad31fd196105867cf29fd8b74485f32d02cfaba94fe2'
           git init -q "$root/repo"
-          git -C "$root/repo" remote add origin https://github.com/NationalSecurityAgency/ghidra.git
+          git -C "$root/repo" remote add origin https://github.com/lief-project/LIEF.git
           git -C "$root/repo" fetch -q --depth=1 origin "$pin"
           git -C "$root/repo" checkout -q --detach FETCH_HEAD
-          test "$(git -C "$root/repo" rev-parse HEAD)" = "$pin"
+          actual="$(git -C "$root/repo" rev-parse HEAD)"
           tree="$(git -C "$root/repo" rev-parse 'HEAD^{tree}')"
-          git -C "$root/repo" archive --format=tar "$pin" | gzip -9 > "$root/source/ghidra-${pin}.tar.gz"
+          test "$actual" = "$pin"
+          git -C "$root/repo" archive --format=tar "$pin" | gzip -9 > "$root/source/lief-${pin}.tar.gz"
           git -C "$root/repo" ls-tree -r --full-tree "$pin" > "$root/receipt/GIT_TREE.txt"
-          gh release download Ghidra_12.1.2_build -R NationalSecurityAgency/ghidra -p 'ghidra_12.1.2_PUBLIC_20260605.zip' -D "$root/release"
-          expected='b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d'
-          printf '%s  %s\n' "$expected" "$root/release/ghidra_12.1.2_PUBLIC_20260605.zip" | sha256sum -c -
-          split -b 300M -d -a 2 "$root/release/ghidra_12.1.2_PUBLIC_20260605.zip" "$root/parts/ghidra_12.1.2_PUBLIC_20260605.zip.part-"
-          test -f "$root/parts/ghidra_12.1.2_PUBLIC_20260605.zip.part-00"
-          test -f "$root/parts/ghidra_12.1.2_PUBLIC_20260605.zip.part-01"
-          test "$(find "$root/parts" -maxdepth 1 -type f | wc -l)" = 2
-          sha256sum "$root/source"/* "$root/parts"/* > "$root/receipt/SHA256SUMS.txt"
-          printf 'tool=ghidra\nversion=12.1.2\npin_sha=%s\ntree_sha=%s\nrelease_expected_sha256=%s\nrun_id=%s\n' "$pin" "$tree" "$expected" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
-          rm -rf "$root/repo" "$root/release"
-      - name: Upload Ghidra source custody
-        uses: actions/upload-artifact@v4
-        with:
-          name: flp6-ghidra-source-receipt
-          path: |
-            _repair/ghidra/source
-            _repair/ghidra/receipt
-          compression-level: 1
-          retention-days: 1
-      - name: Upload Ghidra part 00
-        uses: actions/upload-artifact@v4
-        with:
-          name: flp6-ghidra-part-00
-          path: _repair/ghidra/parts/ghidra_12.1.2_PUBLIC_20260605.zip.part-00
-          compression-level: 0
-          retention-days: 1
-      - name: Upload Ghidra part 01
-        uses: actions/upload-artifact@v4
-        with:
-          name: flp6-ghidra-part-01
-          path: _repair/ghidra/parts/ghidra_12.1.2_PUBLIC_20260605.zip.part-01
-          compression-level: 0
-          retention-days: 1
-
-  reclass:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Acquire exact ReClass.NET source and all v1.2 assets
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          root="$GITHUB_WORKSPACE/_repair/reclass_net"
-          mkdir -p "$root/source" "$root/release" "$root/receipt"
-          pin='e6a5c29930def61373d1fcbda7358bf4d9ba996a'
-          git init -q "$root/repo"
-          git -C "$root/repo" remote add origin https://github.com/ReClassNET/ReClass.NET.git
-          git -C "$root/repo" fetch -q --depth=1 origin "$pin"
-          git -C "$root/repo" checkout -q --detach FETCH_HEAD
-          test "$(git -C "$root/repo" rev-parse HEAD)" = "$pin"
-          tree="$(git -C "$root/repo" rev-parse 'HEAD^{tree}')"
-          git -C "$root/repo" archive --format=tar "$pin" | gzip -9 > "$root/source/reclass_net-${pin}.tar.gz"
-          git -C "$root/repo" ls-tree -r --full-tree "$pin" > "$root/receipt/GIT_TREE.txt"
-          gh release view v1.2 -R ReClassNET/ReClass.NET --json assets > "$root/receipt/RELEASE_ASSETS.json"
-          gh release download v1.2 -R ReClassNET/ReClass.NET -D "$root/release"
-          test -n "$(find "$root/release" -maxdepth 1 -type f -print -quit)"
-          find "$root/release" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort > "$root/receipt/RELEASE_FILES.txt"
-          sha256sum "$root/source"/* "$root/release"/* > "$root/receipt/SHA256SUMS.txt"
-          printf 'tool=reclass_net\nversion=v1.2\npin_sha=%s\ntree_sha=%s\nrun_id=%s\n' "$pin" "$tree" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
+          gh release view 1.0.0 -R lief-project/LIEF --json assets > "$root/receipt/RELEASE_ASSETS.json"
+          gh release download 1.0.0 -R lief-project/LIEF -D "$root/release/all"
+          match=''
+          while IFS= read -r -d '' f; do
+            h="$(sha256sum "$f" | awk '{print $1}')"
+            if test "$h" = "$expected"; then match="$f"; break; fi
+          done < <(find "$root/release/all" -maxdepth 1 -type f -print0)
+          test -n "$match"
+          mkdir -p "$root/release/canonical"
+          cp "$match" "$root/release/canonical/$(basename "$match")"
+          printf '%s  %s\n' "$expected" "$root/release/canonical/$(basename "$match")" | sha256sum -c -
+          find "$root/release/all" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort > "$root/receipt/ALL_RELEASE_FILES.txt"
+          rm -rf "$root/release/all"
+          sha256sum "$root/source"/* "$root/release/canonical"/* > "$root/receipt/SHA256SUMS.txt"
+          printf 'tool=lief\nversion=1.0.0\npin_sha=%s\nresolved_sha=%s\ntree_sha=%s\ncanonical_windows_sha256=%s\nrun_id=%s\n' "$pin" "$actual" "$tree" "$expected" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
           rm -rf "$root/repo"
-      - name: Upload ReClass.NET custody
+      - name: Upload LIEF custody
         uses: actions/upload-artifact@v4
         with:
-          name: flp6-wave1-reclass_net-repair
-          path: _repair/reclass_net
+          name: flp6-wave1-lief
+          path: _closeout/lief
           compression-level: 1
           retention-days: 1
+          if-no-files-found: error
