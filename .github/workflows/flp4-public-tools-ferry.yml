@@ -1,0 +1,101 @@
+name: FLP4 Public Tool Vault Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-public-tools-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ghidra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Acquire exact pinned Ghidra 12.1.2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _ghidra
+          url='https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip'
+          expected='b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 1800 "$url" -o _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip
+          actual="$(sha256sum _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip | awk '{print $1}')"
+          test "$actual" = "$expected"
+          unzip -l _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip | head -100 > _ghidra/ZIP_HEAD.txt
+          printf 'source=%s\nexpected_sha256=%s\nactual_sha256=%s\nrun_id=%s\nhead=%s\n' "$url" "$expected" "$actual" "$GITHUB_RUN_ID" "$GITHUB_SHA" > _ghidra/RECEIPT.txt
+          sha256sum _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip > _ghidra/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-ghidra-12.1.2
+          path: _ghidra
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  pluginval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Acquire pinned pluginval v1.0.4 Linux release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _pluginval/unpacked
+          url='https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Linux.zip'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 900 "$url" -o _pluginval/pluginval_Linux_v1.0.4.zip
+          test "$(stat -c %s _pluginval/pluginval_Linux_v1.0.4.zip)" -gt 5000000
+          unzip -oq _pluginval/pluginval_Linux_v1.0.4.zip -d _pluginval/unpacked
+          find _pluginval/unpacked -type f -maxdepth 4 -exec file {} \; > _pluginval/FILE_IDENTITIES.txt
+          find _pluginval/unpacked -type f -maxdepth 4 -print0 | sort -z | xargs -0 sha256sum > _pluginval/UNPACKED_SHA256SUMS.txt
+          sha256sum _pluginval/pluginval_Linux_v1.0.4.zip > _pluginval/SHA256SUMS.txt
+          printf 'source=%s\ntag=v1.0.4\npinned_commit=ed19c2c16b57a6d94db391bea3ef4a80b769d5bf\nrun_id=%s\nhead=%s\n' "$url" "$GITHUB_RUN_ID" "$GITHUB_SHA" > _pluginval/RECEIPT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-pluginval-v1.0.4-linux
+          path: _pluginval
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  flpdiff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build and test exact pinned flpdiff source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone https://github.com/dawhubapp/flpdiff.git _flpdiff/src
+          cd _flpdiff/src
+          git checkout --detach df4faf3297ab49d674cc53502a9691b8c2d68dad
+          test "$(git rev-parse HEAD)" = 'df4faf3297ab49d674cc53502a9691b8c2d68dad'
+          bun install --frozen-lockfile
+          bun test 2>&1 | tee ../TEST_LOG.txt
+          mkdir -p dist
+          bun run build:binary:linux-x64
+          ./dist/flpdiff-linux-x64 --version 2>&1 | tee ../VERSION.txt
+          sha256sum dist/flpdiff-linux-x64 > ../BINARY_SHA256SUMS.txt
+          git archive --format=tar.gz --output=../flpdiff-df4faf3297ab49d674cc53502a9691b8c2d68dad.tar.gz HEAD
+          sha256sum ../flpdiff-df4faf3297ab49d674cc53502a9691b8c2d68dad.tar.gz > ../SOURCE_SHA256SUMS.txt
+          printf 'upstream=dawhubapp/flpdiff\ncommit=df4faf3297ab49d674cc53502a9691b8c2d68dad\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > ../RECEIPT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-flpdiff-df4faf
+          path: |
+            _flpdiff/src/dist/flpdiff-linux-x64
+            _flpdiff/flpdiff-df4faf3297ab49d674cc53502a9691b8c2d68dad.tar.gz
+            _flpdiff/TEST_LOG.txt
+            _flpdiff/VERSION.txt
+            _flpdiff/BINARY_SHA256SUMS.txt
+            _flpdiff/SOURCE_SHA256SUMS.txt
+            _flpdiff/RECEIPT.txt
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
