@@ -26,7 +26,7 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config \
+            build-essential cmake pkg-config git \
             libsndfile1-dev libx11-dev libxrandr-dev libxinerama-dev \
             libxrender-dev libxcomposite-dev libxcursor-dev libfreetype6-dev \
             libasound2-dev
@@ -44,8 +44,10 @@ jobs:
           psutil>=6.1,<8
           EOF
           python -m pip download --dest _runtime/wheels -r _runtime/requirements-authoritative.txt
-          python -m pip download --no-binary=pedalboard --no-deps --dest _runtime/source 'pedalboard==0.9.24'
           rm -f _runtime/wheels/pedalboard-0.9.24-*.whl
+          git clone --branch v0.9.24 --depth 1 --recurse-submodules https://github.com/spotify/pedalboard.git _runtime/source/pedalboard
+          git -C _runtime/source/pedalboard rev-parse HEAD > _runtime/PEDALBOARD_SOURCE_COMMIT.txt
+          git -C _runtime/source/pedalboard submodule status --recursive > _runtime/PEDALBOARD_SUBMODULES.txt
 
       - name: Build exact Pedalboard 0.9.24 with portable SIMD baseline
         shell: bash
@@ -55,8 +57,14 @@ jobs:
           CXXFLAGS: '-O2 -mavx'
         run: |
           set -Eeuo pipefail
-          python -m pip wheel --no-deps --wheel-dir _runtime/wheels _runtime/source/pedalboard-0.9.24.tar.gz | tee _runtime/PEDALBOARD_BUILD.txt
-          file _runtime/wheels/pedalboard-0.9.24-*.whl > _runtime/PEDALBOARD_WHEEL_IDENTITY.txt
+          python -m pip wheel --no-deps --wheel-dir _runtime/wheels _runtime/source/pedalboard | tee _runtime/PEDALBOARD_BUILD.txt
+          python - <<'PY'
+          import glob, zipfile
+          wheel=glob.glob('_runtime/wheels/pedalboard-0.9.24-*.whl')[0]
+          with zipfile.ZipFile(wheel) as z:
+              so=[n for n in z.namelist() if n.endswith('.so') and 'pedalboard_native' in n][0]
+              open('_runtime/PEDALBOARD_NATIVE_MEMBER.txt','w').write(so+'\n')
+          PY
 
       - name: Hash final armory and prove fully offline use
         shell: bash
@@ -66,7 +74,6 @@ jobs:
           python -m pip --version > _runtime/PIP_VERSION.txt
           find _runtime/wheels -maxdepth 1 -type f -printf '%f\n' | sort > _runtime/WHEEL_FILES.txt
           sha256sum _runtime/wheels/* | sort -k2 > _runtime/SHA256SUMS.txt
-          sha256sum _runtime/source/* | sort -k2 > _runtime/SOURCE_SHA256SUMS.txt
           printf 'run_id=%s\nrun_attempt=%s\nhead=%s\nportable_simd=USE_PORTABLE_SIMD=1 -mavx\n' \
             "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" > _runtime/RECEIPT.txt
           python -m venv _proof_venv
