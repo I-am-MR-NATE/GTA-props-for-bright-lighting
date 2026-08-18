@@ -1,0 +1,139 @@
+name: FLP Native Windows Install Ferry V2
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-native-windows-install-ferry-v2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  install-pack:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - name: Download verify and silently install official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = 'C:\flp-native-ferry'
+          New-Item -ItemType Directory -Force -Path $work,"$work\meta","$work\parts" | Out-Null
+          $installer = "$work\flstudio-latest.exe"
+          $url = 'https://support.image-line.com/redirect/flstudio_win_installer'
+          $expectedInstallerSha = '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3'
+          & curl.exe -fL --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 -A 'MEGA-DAN-FLP-Builder/1.0' $url -o $installer
+          if ($LASTEXITCODE -ne 0) { throw "curl failed $LASTEXITCODE" }
+          $bytes=(Get-Item $installer).Length
+          if ($bytes -ne 1107195744) { throw "unexpected installer bytes $bytes" }
+          $sha=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne $expectedInstallerSha) { throw "installer SHA mismatch $sha" }
+          $first=[IO.File]::ReadAllBytes($installer)[0..1]
+          if ($first[0] -ne 0x4d -or $first[1] -ne 0x5a) { throw 'installer is not MZ' }
+          $proc=Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "installer exit $($proc.ExitCode)" }
+          Start-Sleep -Seconds 5
+          $running=Get-Process -Name FL64,FL -ErrorAction SilentlyContinue
+          if ($running) { $running | Stop-Process -Force; throw 'installer unexpectedly launched FL Studio' }
+          $fl=Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Filter FL64.exe -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $fl) { throw 'FL64.exe not found' }
+          $imageLineRoot = $fl.FullName
+          while ((Split-Path $imageLineRoot -Leaf) -notmatch '^Image-Line$' -and (Split-Path $imageLineRoot -Parent)) { $imageLineRoot = Split-Path $imageLineRoot -Parent }
+          if ((Split-Path $imageLineRoot -Leaf) -notmatch '^Image-Line$') { $imageLineRoot = Split-Path $fl.FullName -Parent }
+          $flSha=(Get-FileHash $fl.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $vi=(Get-Item $fl.FullName).VersionInfo
+          $engine=Get-ChildItem $imageLineRoot -Filter FLEngine_x64.dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $engineSha=if ($engine) {(Get-FileHash $engine.FullName -Algorithm SHA256).Hash.ToLowerInvariant()} else {''}
+          @(
+            "source_redirect=$url",
+            "installer_bytes=$bytes",
+            "installer_sha256=$sha",
+            "image_line_root=$imageLineRoot",
+            "fl64_path=$($fl.FullName)",
+            "fl64_sha256=$flSha",
+            "file_version=$($vi.FileVersion)",
+            "product_version=$($vi.ProductVersion)",
+            "engine_path=$($engine.FullName)",
+            "engine_sha256=$engineSha",
+            "run_id=$env:GITHUB_RUN_ID",
+            "head=$env:GITHUB_SHA"
+          ) | Set-Content "$work\meta\RECEIPT.txt"
+          Set-Content "$work\meta\IMAGE_LINE_ROOT.txt" $imageLineRoot
+          Get-ChildItem $imageLineRoot -Recurse -File | ForEach-Object {
+            $rel=$_.FullName.Substring($imageLineRoot.Length).TrimStart('\')
+            "$rel`t$($_.Length)"
+          } | Sort-Object | Set-Content "$work\meta\FILE_LIST.tsv"
+          Get-ChildItem $imageLineRoot -Recurse -File | ForEach-Object {
+            $rel=$_.FullName.Substring($imageLineRoot.Length).TrimStart('\')
+            $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$h  $rel"
+          } | Set-Content "$work\meta\FILE_SHA256SUMS.txt"
+          cmd /c "reg export HKLM\SOFTWARE\Image-Line $work\meta\HKLM_IMAGE_LINE.reg /y" 2>$null | Out-Null
+          cmd /c "reg export HKCU\SOFTWARE\Image-Line $work\meta\HKCU_IMAGE_LINE.reg /y" 2>$null | Out-Null
+          Write-Host "FL64 $($vi.FileVersion) sha=$flSha"
+          Write-Host "Image-Line root $imageLineRoot"
+
+      - name: Pack installed Image-Line tree into 300 MiB volumes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work='C:\flp-native-ferry'
+          $root=(Get-Content "$work\meta\IMAGE_LINE_ROOT.txt" -Raw).Trim()
+          $seven='C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $seven)) { throw '7-Zip missing' }
+          & $seven a -t7z -mx=1 -v300m "$work\parts\flstudio-installed.7z" "$root\*"
+          if ($LASTEXITCODE -ne 0) { throw "7z exit $LASTEXITCODE" }
+          $parts=Get-ChildItem "$work\parts\flstudio-installed.7z.*" | Sort-Object Name
+          if (-not $parts) { throw 'no archive parts' }
+          if ($parts.Count -gt 12) { throw "too many parts $($parts.Count)" }
+          $parts | ForEach-Object { "$($_.Name)`t$($_.Length)" } | Set-Content "$work\meta\PART_BYTES.tsv"
+          $parts | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } | Set-Content "$work\meta\PART_SHA256SUMS.txt"
+          $parts.Name | Set-Content "$work\meta\PART_ORDER.txt"
+          Set-Content "$work\meta\PART_COUNT.txt" $parts.Count
+          Write-Host "parts=$($parts.Count)"
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-native-v2-meta
+          path: C:\flp-native-ferry\meta
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 001
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-001, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.001', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 002
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-002, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.002', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 003
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-003, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.003', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 004
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-004, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.004', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 005
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-005, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.005', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 006
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-006, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.006', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 007
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-007, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.007', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 008
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-008, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.008', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 009
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-009, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.009', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 010
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-010, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.010', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 011
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-011, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.011', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 012
+        uses: actions/upload-artifact@v4
+        with: {name: flp-native-v2-part-012, path: 'C:\flp-native-ferry\parts\flstudio-installed.7z.012', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
