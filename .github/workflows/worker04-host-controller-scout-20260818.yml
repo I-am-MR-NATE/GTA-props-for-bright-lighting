@@ -1,0 +1,161 @@
+name: Worker04 Host Controller Scout
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  scout:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Install official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $ProgressPreference='SilentlyContinue'
+          $installer=Join-Path $env:RUNNER_TEMP 'flstudio-latest.exe'
+          & curl.exe -L --fail --retry 2 --connect-timeout 30 -o $installer 'https://support.image-line.com/redirect/flstudio_win_installer'
+          if($LASTEXITCODE -ne 0){throw "curl failed: $LASTEXITCODE"}
+          $installerItem=Get-Item $installer
+          $installerHash=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($installerItem.Length -ne 1107195744){throw "unexpected installer size $($installerItem.Length)"}
+          if($installerHash -ne '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3'){throw "unexpected installer hash $installerHash"}
+          $ip=Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
+          $fl=Get-ChildItem 'C:\Program Files\Image-Line' -Filter FL64.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if(-not $fl){throw "FL64 missing after installer exit $($ip.ExitCode)"}
+          $root=Split-Path -Parent $fl.FullName
+          "FLROOT=$root" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "INSTALLER_EXIT=$($ip.ExitCode)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Scan vendor FLPs for real event 223 witnesses
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $script=Join-Path $env:RUNNER_TEMP 'worker04_scout.py'
+          @'
+          from __future__ import annotations
+          import hashlib, json, re, shutil, struct
+          from pathlib import Path
+          import os
+
+          ROOT = Path(os.environ['FLROOT'])
+          OUT = Path(os.environ['RUNNER_TEMP']) / 'worker04-host-controller-scout.json'
+          POS = Path(os.environ['RUNNER_TEMP']) / 'worker04-positive-event223.flp'
+
+          def sha256(path: Path) -> str:
+              h=hashlib.sha256()
+              with path.open('rb') as f:
+                  for b in iter(lambda:f.read(1024*1024),b''):
+                      h.update(b)
+              return h.hexdigest()
+
+          def decode_varint(data: bytes, offset: int):
+              value=0
+              for byte_index in range(5):
+                  if offset>=len(data): raise ValueError('truncated varint')
+                  byte=data[offset]; offset+=1
+                  if byte_index==4 and (byte & 0x80 or byte & 0x70): raise ValueError('varint >32 bits')
+                  value |= (byte & 0x7f) << (byte_index*7)
+                  if not byte & 0x80: return value,offset
+              raise ValueError('varint >5 bytes')
+
+          def modern_banner_major(data: bytes, payload_start: int, data_end: int):
+              banner_event=payload_start+3
+              if banner_event>=data_end or data[banner_event]!=0xC0: return None
+              try: size,start=decode_varint(data,banner_event+1)
+              except ValueError: return None
+              end=start+size
+              if end>data_end: return None
+              raw=data[start:end]
+              if len(raw)%2: return None
+              try: text=raw.decode('utf-16le').rstrip('\0')
+              except UnicodeDecodeError: return None
+              m=re.match(r'\s*FL Studio (\d+)(?:\.|\s|$)',text)
+              if not m: return None
+              major=int(m.group(1)); return major if major>=25 else None
+
+          def parse(path: Path):
+              data=path.read_bytes()
+              if len(data)<22 or data[:4]!=b'FLhd': raise ValueError('not FLP')
+              hs=struct.unpack_from('<I',data,4)[0]; he=8+hs
+              if he+8>len(data) or data[he:he+4]!=b'FLdt': raise ValueError('bad container')
+              ds=struct.unpack_from('<I',data,he+4)[0]; cur=he+8; de=cur+ds
+              if de>len(data): raise ValueError('truncated FLdt')
+              ppq=struct.unpack_from('<H',data,12)[0]
+              fl_major=None; ac_width=None; event_index=0; hits=[]
+              while cur<de:
+                  event_start=cur; eid=data[cur]; cur+=1; length_bytes=b''
+                  if eid==0xAC:
+                      bm=modern_banner_major(data,cur,de)
+                      if ac_width is not None: size=ac_width
+                      elif bm is not None:
+                          if fl_major is None: raise ValueError('ambiguous versionless AC')
+                          size=3; ac_width=3
+                      elif fl_major is not None and fl_major>=25:
+                          size=3; ac_width=3
+                      else:
+                          size=4; ac_width=4
+                  elif eid<64: size=1
+                  elif eid<128: size=2
+                  elif eid<192: size=4
+                  else:
+                      ls=cur; size,cur=decode_varint(data,cur); length_bytes=data[ls:cur]
+                  pe=cur+size
+                  if pe>de: raise ValueError(f'event {event_index} extends beyond FLdt')
+                  payload=data[cur:pe]
+                  if eid==0xC7:
+                      m=re.match(rb'\s*(\d+)',payload.rstrip(b'\0'))
+                      if m: fl_major=int(m.group(1))
+                  if eid==223:
+                      row={'event_index':event_index,'file_offset':event_start,'payload_len':len(payload),'payload_hex':payload.hex()}
+                      if len(payload)>=4:
+                          row['first4_hex']=payload[:4].hex()
+                          row['first4_u32_le']=int.from_bytes(payload[:4],'little')
+                          row['first4_f32_le']=struct.unpack('<f',payload[:4])[0]
+                      hits.append(row)
+                  cur=pe; event_index+=1
+              return {'ppq':ppq,'event_count':event_index,'event223':hits}
+
+          scanned=[]; positives=[]; failures=[]
+          for p in sorted(ROOT.rglob('*.flp')):
+              try:
+                  parsed=parse(p)
+                  row={'relative_path':p.relative_to(ROOT).as_posix(),'bytes':p.stat().st_size,'sha256':sha256(p),**parsed}
+                  scanned.append(row)
+                  if parsed['event223']: positives.append(row)
+              except Exception as e:
+                  failures.append({'relative_path':p.relative_to(ROOT).as_posix(),'error':f'{type(e).__name__}: {e}'})
+          positives.sort(key=lambda r:(r['bytes'],r['relative_path']))
+          chosen=positives[0] if positives else None
+          if chosen:
+              shutil.copy2(ROOT / chosen['relative_path'], POS)
+          report={
+              'schema':'worker04.official-fl-event223-scout.v1',
+              'fl_root':str(ROOT),
+              'installer_exit':os.environ.get('INSTALLER_EXIT'),
+              'scanned_count':len(scanned),
+              'parse_failure_count':len(failures),
+              'positive_count':len(positives),
+              'chosen':chosen,
+              'positives':positives,
+              'failures':failures,
+              'truth_boundary':'Scans only vendor FLP files physically installed by the exact official FL Studio installer on this hosted Windows runner. Event framing mirrors current Foundry raw.py including FL25+ 0xAC handling. No parser semantic winner is inferred here.'
+          }
+          OUT.write_text(json.dumps(report,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps({'scanned_count':len(scanned),'parse_failure_count':len(failures),'positive_count':len(positives),'chosen':chosen},indent=2,sort_keys=True))
+          '@ | Set-Content $script -Encoding utf8
+          python $script
+
+      - name: Upload scout evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker04-host-controller-scout
+          path: |
+            ${{ runner.temp }}/worker04-host-controller-scout.json
+            ${{ runner.temp }}/worker04-positive-event223.flp
+          if-no-files-found: warn
+          retention-days: 1
