@@ -1,0 +1,25 @@
+name: FLP Armory Runner Smoke
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-armory-runner-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prove public Actions runner execution
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf 'runner_alive=yes\n'
+          uname -a
+          python3 --version
+          curl --version | head -n 1
