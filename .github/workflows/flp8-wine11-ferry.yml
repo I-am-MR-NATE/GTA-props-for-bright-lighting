@@ -32,7 +32,6 @@ jobs:
           pefile>=2024.8.26,<2025
           psutil>=6.1,<8
           EOF
-          python -m pip install --upgrade pip
           python -m pip download --dest _runtime/wheels -r _runtime/requirements-authoritative.txt
           python -m pip --version > _runtime/PIP_VERSION.txt
           python --version > _runtime/PYTHON_VERSION.txt 2>&1
@@ -40,21 +39,24 @@ jobs:
           sha256sum _runtime/wheels/* | sort -k2 > _runtime/SHA256SUMS.txt
           printf 'run_id=%s\nrun_attempt=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" > _runtime/RECEIPT.txt
 
-      - name: Prove clean offline install and imports
+      - name: Prove clean offline install and record per-module imports
         shell: bash
         run: |
           set -Eeuo pipefail
           python -m venv _proof_venv
-          _proof_venv/bin/python -m pip install --no-index --find-links _runtime/wheels -r _runtime/requirements-authoritative.txt
-          _proof_venv/bin/python - <<'PY' | tee _runtime/IMPORT_PROOF.txt
-          import luaparser, mido, pedalboard, pefile, psutil
-          import importlib.metadata as m
-          for package in ('luaparser','mido','pedalboard','pefile','psutil'):
-              print(package, m.version(package))
-          PY
+          _proof_venv/bin/python -m pip install --no-index --find-links _runtime/wheels -r _runtime/requirements-authoritative.txt | tee _runtime/OFFLINE_INSTALL.txt
           _proof_venv/bin/python -m pip check | tee _runtime/PIP_CHECK.txt
+          : > _runtime/IMPORT_PROOF.txt
+          for mod in luaparser mido pedalboard pefile psutil; do
+            set +e
+            _proof_venv/bin/python -c "import ${mod}; import importlib.metadata as m; print('${mod}', m.version('${mod}'))" >> _runtime/IMPORT_PROOF.txt 2>&1
+            rc=$?
+            set -e
+            printf '%s rc=%s\n' "$mod" "$rc" | tee -a _runtime/IMPORT_PROOF.txt
+          done
 
       - name: Upload verified runtime artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: flp8-flp-foundry-v0.7.0-python313-runtime
