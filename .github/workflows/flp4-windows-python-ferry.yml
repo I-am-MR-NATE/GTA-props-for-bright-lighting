@@ -1,0 +1,50 @@
+name: FLP4 Windows Python Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-windows-python-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build portable Windows Python runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $PWD '_python311'
+          Copy-Item -Recurse -Force $env:pythonLocation $root
+          & "$root\python.exe" -m pip install --upgrade pip setuptools wheel
+          & "$root\python.exe" -m pip install `
+            'luaparser>=3.3.1,<4' `
+            'mido>=1.3.3,<2' `
+            'pedalboard>=0.9.24,<0.10' `
+            'pefile>=2024.8.26,<2025' `
+            'psutil>=6.1,<8' `
+            'pyflp==2.2.1' `
+            'lief==1.0.0' construct construct-typing capstone unicorn kaitaistruct pytest ruff
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          & "$root\python.exe" -c "import luaparser,mido,pedalboard,pefile,psutil,pyflp,lief,construct,capstone,unicorn,kaitaistruct; print('IMPORTS_PASS')" | Tee-Object -FilePath "$root\IMPORT_CHECK.txt"
+          & "$root\python.exe" --version | Tee-Object -FilePath "$root\PYTHON_VERSION.txt"
+          & "$root\python.exe" -m pip check | Tee-Object -FilePath "$root\PIP_CHECK.txt"
+          Get-ChildItem -Recurse -File $root | Sort-Object FullName | ForEach-Object {
+            $h=(Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$h  $($_.FullName.Substring($root.Length + 1).Replace('\','/'))"
+          } | Set-Content -Encoding ascii "$root\TREE_SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-windows-python311-runtime
+          path: _python311
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
