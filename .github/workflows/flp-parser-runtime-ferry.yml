@@ -1,0 +1,79 @@
+name: FLP Parser Runtime Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-parser-runtime-ferry.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-parser-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.2'
+
+      - name: Build exact parser bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf out _src
+          mkdir -p out/pyflp_site out/flpdiff out/ts-flp _src
+
+          python -m pip install --disable-pip-version-check --no-compile --target out/pyflp_site 'pyflp==2.2.1'
+          PYTHONPATH="$PWD/out/pyflp_site" python - <<'PY'
+          import importlib.metadata as md
+          import pyflp
+          print('pyflp', md.version('pyflp'), pyflp.__file__)
+          assert md.version('pyflp') == '2.2.1'
+          PY
+
+          git clone --filter=blob:none https://github.com/dawhubapp/flpdiff.git _src/flpdiff
+          git -C _src/flpdiff checkout --detach df4faf3297ab49d674cc53502a9691b8c2d68dad
+          test "$(git -C _src/flpdiff rev-parse HEAD)" = 'df4faf3297ab49d674cc53502a9691b8c2d68dad'
+          (cd _src/flpdiff && bun install --frozen-lockfile && bun run build:binary:linux-x64)
+          cp _src/flpdiff/dist/flpdiff-linux-x64 out/flpdiff/flpdiff-linux-x64
+          chmod +x out/flpdiff/flpdiff-linux-x64
+          out/flpdiff/flpdiff-linux-x64 --version > out/flpdiff/VERSION.txt
+          printf '%s\n' 'df4faf3297ab49d674cc53502a9691b8c2d68dad' > out/flpdiff/COMMIT.txt
+
+          git clone --filter=blob:none https://github.com/SpendLessDaw/ts-flp.git _src/ts-flp
+          git -C _src/ts-flp checkout --detach 0fe4ef5db4fc4b62733a061109247907a8c68795
+          test "$(git -C _src/ts-flp rev-parse HEAD)" = '0fe4ef5db4fc4b62733a061109247907a8c68795'
+          corepack enable
+          corepack prepare pnpm@10.18.1 --activate
+          (cd _src/ts-flp && pnpm install --frozen-lockfile && pnpm run build)
+          cp -a _src/ts-flp/dist out/ts-flp/dist
+          cp -a _src/ts-flp/src out/ts-flp/src
+          cp _src/ts-flp/index.ts _src/ts-flp/package.json _src/ts-flp/pnpm-lock.yaml out/ts-flp/
+          printf '%s\n' '0fe4ef5db4fc4b62733a061109247907a8c68795' > out/ts-flp/COMMIT.txt
+
+          find out -type f -print0 | sort -z | xargs -0 sha256sum > out/SHA256SUMS.txt
+          python --version > out/PYTHON_VERSION.txt
+          node --version > out/NODE_VERSION.txt
+          bun --version > out/BUN_VERSION.txt
+          printf 'pyflp=2.2.1\nflpdiff_commit=df4faf3297ab49d674cc53502a9691b8c2d68dad\nts_flp_commit=0fe4ef5db4fc4b62733a061109247907a8c68795\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/RECEIPT.txt
+
+      - name: Upload exact parser runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-parser-runtime-exact
+          path: out
+          compression-level: 1
+          retention-days: 30
+          if-no-files-found: error
