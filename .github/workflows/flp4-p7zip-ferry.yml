@@ -1,0 +1,35 @@
+name: FLP4 P7zip Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-p7zip-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  p7zip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Package p7zip NSIS extractor
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+          mkdir -p _p7zip
+          7z i > _p7zip/INFO.txt
+          tar -C / -czf _p7zip/p7zip-linux.tar.gz usr/bin/7z usr/bin/7za usr/lib/p7zip
+          sha256sum _p7zip/p7zip-linux.tar.gz > _p7zip/SHA256SUMS.txt
+          printf 'run_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > _p7zip/RECEIPT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-p7zip-linux
+          path: _p7zip
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
