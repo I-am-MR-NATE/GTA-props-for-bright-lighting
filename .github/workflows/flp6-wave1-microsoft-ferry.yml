@@ -1,0 +1,153 @@
+name: FLP6 Wave1 Microsoft Tool Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp6-wave1-microsoft-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  procmon:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Acquire canonical Process Monitor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE '_ms\procmon'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $zip = Join-Path $root 'ProcessMonitor.zip'
+          Invoke-WebRequest -UseBasicParsing 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile $zip
+          Expand-Archive -Force $zip (Join-Path $root 'runtime')
+          $rows = Get-ChildItem (Join-Path $root 'runtime') -File | ForEach-Object {
+            $vi = $_.VersionInfo
+            [pscustomobject]@{ Name=$_.Name; Bytes=$_.Length; SHA256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(); FileVersion=$vi.FileVersion; ProductVersion=$vi.ProductVersion }
+          }
+          $rows | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $root 'VERSIONS.json')
+          if (-not (Test-Path (Join-Path $root 'runtime\Procmon64.exe'))) { throw 'Procmon64.exe missing' }
+          $pv=(Get-Item (Join-Path $root 'runtime\Procmon64.exe')).VersionInfo.ProductVersion
+          if ($pv -notmatch '^4\.04') { throw "Expected Procmon 4.04, got $pv" }
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-String | Set-Content (Join-Path $root 'ARCHIVE_SHA256.txt')
+          "source=https://download.sysinternals.com/files/ProcessMonitor.zip`ncanonical_version=4.04`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'RECEIPT.txt')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-ms-procmon-4.04
+          path: _ms/procmon
+          retention-days: 1
+          compression-level: 0
+
+  windbg:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Acquire canonical WinDbg package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE '_ms\windbg'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          winget --version | Set-Content (Join-Path $root 'WINGET_VERSION.txt')
+          winget show --id Microsoft.WinDbg --exact --versions --accept-source-agreements | Out-String | Set-Content (Join-Path $root 'AVAILABLE_VERSIONS.txt')
+          winget download --id Microsoft.WinDbg --exact --version 1.2606.22001.0 --accept-source-agreements --accept-package-agreements --download-directory $root --skip-dependencies
+          $files=Get-ChildItem $root -File | Where-Object { $_.Name -notmatch 'VERSION|RECEIPT|AVAILABLE' }
+          if (-not $files) { throw 'WinDbg package did not download' }
+          $files | ForEach-Object { [pscustomobject]@{Name=$_.Name;Bytes=$_.Length;SHA256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()} } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $root 'FILES.json')
+          $expected='12e63fb884347567bdd35f67f7aad61b26a08f8404553dad6951a10776f7d771'
+          $match=$files | Where-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() -eq $expected }
+          if (-not $match) { throw 'Canonical WinDbg installer SHA not found in downloaded files' }
+          "package_id=Microsoft.WinDbg`ncanonical_version=1.2606.22001.0`ncanonical_installer_sha256=$expected`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'RECEIPT.txt')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-ms-windbg-1.2606.22001.0
+          path: _ms/windbg
+          retention-days: 1
+          compression-level: 0
+
+  wpt:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Acquire Windows Performance Toolkit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE '_ms\wpr_wpa'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $candidates=@()
+          $candidates += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit' -File -Recurse -ErrorAction SilentlyContinue
+          $candidates += Get-ChildItem 'C:\Program Files\Windows Kits\10\Windows Performance Toolkit' -File -Recurse -ErrorAction SilentlyContinue
+          $wpr=$candidates | Where-Object Name -ieq 'wpr.exe' | Select-Object -First 1
+          $wpa=$candidates | Where-Object Name -ieq 'wpa.exe' | Select-Object -First 1
+          if (-not $wpr -or -not $wpa) {
+            winget search --query 'Windows Assessment and Deployment Kit' --accept-source-agreements | Out-String | Set-Content (Join-Path $root 'WINGET_SEARCH.txt')
+            $ids=@('Microsoft.WindowsADK','Microsoft.WindowsAssessmentAndDeploymentKit')
+            $installed=$false
+            foreach($id in $ids) {
+              try {
+                winget install --id $id --exact --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+                $installed=$true; break
+              } catch {}
+            }
+            $candidates=@()
+            $candidates += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit' -File -Recurse -ErrorAction SilentlyContinue
+            $candidates += Get-ChildItem 'C:\Program Files\Windows Kits\10\Windows Performance Toolkit' -File -Recurse -ErrorAction SilentlyContinue
+            $wpr=$candidates | Where-Object Name -ieq 'wpr.exe' | Select-Object -First 1
+            $wpa=$candidates | Where-Object Name -ieq 'wpa.exe' | Select-Object -First 1
+          }
+          if (-not $wpr -or -not $wpa) { throw 'WPR/WPA not found after acquisition attempts' }
+          $src=Split-Path $wpr.FullName -Parent
+          Copy-Item -Recurse -Force $src (Join-Path $root 'runtime')
+          $rows=Get-ChildItem (Join-Path $root 'runtime') -File -Recurse | ForEach-Object { [pscustomobject]@{Relative=$_.FullName.Substring((Join-Path $root 'runtime').Length).TrimStart('\');Bytes=$_.Length;SHA256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower();FileVersion=$_.VersionInfo.FileVersion;ProductVersion=$_.VersionInfo.ProductVersion} }
+          $rows | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $root 'FILES.json')
+          "canonical_baseline=ADK 10.1.26100.2454 + KB5079391`nwpr=$($wpr.VersionInfo.FileVersion)`nwpa=$($wpa.VersionInfo.FileVersion)`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'RECEIPT.txt')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-ms-wpr-wpa
+          path: _ms/wpr_wpa
+          retention-days: 1
+          compression-level: 1
+
+  appverif_gflags:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Acquire Application Verifier and GFlags
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE '_ms\appverif_gflags'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          function Find-Tools {
+            $g=Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10' -Filter gflags.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            $a=Get-ChildItem 'C:\Program Files' -Filter appverif.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if(-not $a){$a=Get-ChildItem 'C:\Program Files (x86)' -Filter appverif.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1}
+            return @($g,$a)
+          }
+          $tools=Find-Tools; $g=$tools[0]; $a=$tools[1]
+          if (-not $g -or -not $a) {
+            winget search --query 'Windows SDK' --accept-source-agreements | Out-String | Set-Content (Join-Path $root 'WINGET_SEARCH.txt')
+            $ids=@('Microsoft.WindowsSDK.10.0.26100','Microsoft.WindowsSDK','Microsoft.WindowsSDK.10.0')
+            foreach($id in $ids) {
+              try { winget install --id $id --exact --accept-source-agreements --accept-package-agreements --silent --disable-interactivity; break } catch {}
+            }
+            $tools=Find-Tools; $g=$tools[0]; $a=$tools[1]
+          }
+          if (-not $g) { throw 'gflags.exe not found' }
+          if (-not $a) { throw 'appverif.exe not found' }
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'runtime\gflags'),(Join-Path $root 'runtime\appverif') | Out-Null
+          Copy-Item -Force $g.FullName (Join-Path $root 'runtime\gflags\gflags.exe')
+          Copy-Item -Force $a.FullName (Join-Path $root 'runtime\appverif\appverif.exe')
+          $rows=@($g,$a) | ForEach-Object { [pscustomobject]@{Name=$_.Name;Source=$_.FullName;Bytes=$_.Length;SHA256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower();FileVersion=$_.VersionInfo.FileVersion;ProductVersion=$_.VersionInfo.ProductVersion} }
+          $rows | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $root 'FILES.json')
+          "canonical_baseline=Windows SDK 10.0.26100.8876`ngflags=$($g.VersionInfo.FileVersion)`nappverif=$($a.VersionInfo.FileVersion)`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'RECEIPT.txt')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-ms-appverif-gflags
+          path: _ms/appverif_gflags
+          retention-days: 1
+          compression-level: 1
