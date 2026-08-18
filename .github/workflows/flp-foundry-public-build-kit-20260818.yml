@@ -1,0 +1,55 @@
+name: FLP Foundry Public Build Kit 20260818
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.foundry-public-build-kit-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Assemble exact public cross-build kit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/foundry-build-kit"
+          mkdir -p "$root/src" "$root/rust-targets" "$root/toolchain" "$root/meta"
+          rustc --version --verbose | tee "$root/meta/RUSTC.txt"
+          cargo --version --verbose | tee "$root/meta/CARGO.txt"
+          rustup target add x86_64-pc-windows-gnullvm i686-pc-windows-gnullvm
+          sysroot="$(rustc --print sysroot)"
+          cp -a "$sysroot/lib/rustlib/x86_64-pc-windows-gnullvm" "$root/rust-targets/"
+          cp -a "$sysroot/lib/rustlib/i686-pc-windows-gnullvm" "$root/rust-targets/"
+
+          git clone https://github.com/HelgeSverre/rust-vst3-host.git "$root/src/rust-vst3-host"
+          git -C "$root/src/rust-vst3-host" checkout ed054908cfe057694d8cf037d0c39dfb5eb4c2ca
+          printf '%s\n' ed054908cfe057694d8cf037d0c39dfb5eb4c2ca > "$root/meta/VST3_SHA.txt"
+          (cd "$root/src/rust-vst3-host" && cargo vendor --locked "$root/vendor-vst3" > "$root/meta/VST3_CARGO_CONFIG.toml")
+
+          git clone https://github.com/RustAudio/vst-rs.git "$root/src/rust-vst2-host"
+          git -C "$root/src/rust-vst2-host" checkout 8b38c29bb8f25d81bbc6ccf93b6575a7b17a1401
+          printf '%s\n' 8b38c29bb8f25d81bbc6ccf93b6575a7b17a1401 > "$root/meta/VST2_SHA.txt"
+          (cd "$root/src/rust-vst2-host" && cargo vendor "$root/vendor-vst2" > "$root/meta/VST2_CARGO_CONFIG.toml")
+
+          url='https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64.tar.xz'
+          curl -fL --retry 5 --retry-all-errors "$url" -o "$root/toolchain/llvm-mingw.tar.xz"
+          tar -xJf "$root/toolchain/llvm-mingw.tar.xz" -C "$root/toolchain"
+          rm "$root/toolchain/llvm-mingw.tar.xz"
+          printf '%s\n' "$url" > "$root/meta/LLVM_MINGW_URL.txt"
+
+          find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/meta/SHA256SUMS.txt"
+
+      - name: Upload public Foundry build kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-public-build-kit
+          path: ${{ runner.temp }}/foundry-build-kit
+          compression-level: 3
+          retention-days: 1
+          if-no-files-found: error
