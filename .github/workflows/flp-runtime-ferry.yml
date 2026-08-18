@@ -1,4 +1,4 @@
-# ferry-trigger: 2026-08-18T05:22Z chunked-installer
+# ferry-trigger: 2026-08-18T05:33Z full-builder-runtime
 name: FLP Runtime Ferry
 
 on:
@@ -25,9 +25,26 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p _runtime/python-wheels
+          cat > _runtime/PYPROJECT_CORE_REQUIREMENTS.txt <<'EOF'
+          luaparser>=3.3.1,<4
+          mido>=1.3.3,<2
+          pedalboard>=0.9.24,<0.10
+          pefile>=2024.8.26,<2025
+          psutil>=6.1,<8
+          EOF
+          cat > _runtime/PARSER_ANALYSIS_REQUIREMENTS.txt <<'EOF'
+          pyflp==2.2.1
+          pefile>=2024.8.26,<2025
+          lief==1.0.0
+          construct
+          construct-typing
+          capstone
+          unicorn
+          kaitaistruct
+          EOF
           python3 -m pip download --dest _runtime/python-wheels \
-            'pyflp==2.2.1' 'pefile' 'lief==1.0.0' 'construct' 'construct-typing' \
-            'capstone' 'unicorn' 'kaitaistruct'
+            -r _runtime/PYPROJECT_CORE_REQUIREMENTS.txt \
+            -r _runtime/PARSER_ANALYSIS_REQUIREMENTS.txt
           find _runtime/python-wheels -maxdepth 1 -type f -printf '%f\n' | sort | tee _runtime/PYTHON_WHEELS.txt
           sha256sum _runtime/python-wheels/* | sort -k2 > _runtime/PYTHON_WHEELS_SHA256SUMS.txt
 
