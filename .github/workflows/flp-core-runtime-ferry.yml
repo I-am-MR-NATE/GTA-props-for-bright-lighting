@@ -1,4 +1,4 @@
-# trigger: 2026-08-18T05:35Z
+# trigger: 2026-08-18T05:37Z python313
 name: FLP Core Runtime Ferry
 
 on:
@@ -20,6 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Use Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Download full current FLP Builder Python runtime
         shell: bash
         run: |
