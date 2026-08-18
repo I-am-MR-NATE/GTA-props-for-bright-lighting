@@ -1,5 +1,6 @@
 name: Private-only FLP public ferry purge
 
+# second push intentionally triggers this already-present one-shot workflow
 on:
   push:
     branches: [master]
@@ -37,7 +38,6 @@ jobs:
             -d '{"private":true}')"
           echo "repository_visibility_patch_http=$code"
           cat /tmp/privacy-response.json || true
-          # Continue even if GitHub correctly requires stronger repository-admin authority.
           exit 0
 
       - name: Close any remaining open pull requests
