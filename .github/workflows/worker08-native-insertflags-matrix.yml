@@ -119,8 +119,8 @@ jobs:
             $before=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant();$p=Start-Process -FilePath $fl -ArgumentList ('"'+$project+'"') -PassThru;Start-Sleep 15;$p.Refresh()
             $ws=New-Object -ComObject WScript.Shell;[void]$ws.AppActivate($p.Id);Start-Sleep 1;[System.Windows.Forms.SendKeys]::SendWait('{ENTER}');Start-Sleep 4
             [void]$ws.AppActivate($p.Id);[System.Windows.Forms.SendKeys]::SendWait('{F9}');Start-Sleep 3
-            # Select Insert 1 on the known 1024x768 hosted surface; if layout moved, the full screenshot still preserves the result.
-            ClickAt 515 355;Start-Sleep 2;$p.Refresh();Shot "$out\$label-mixer-selected.png"
+            # Select Insert 1 by its vertical name area, deliberately avoiding the green enable/mute light.
+            ClickAt 507 320;Start-Sleep 2;$p.Refresh();Shot "$out\$label-mixer-selected.png"
             $after=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant()
             [ordered]@{label=$label;project=$project;pid=$p.Id;title=$p.MainWindowTitle;responding=$p.Responding;exited=$p.HasExited;sha256_before=$before;sha256_after=$after;unchanged=($before -eq $after)}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 "$out\$label-runtime.json"
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue;Start-Sleep 2
