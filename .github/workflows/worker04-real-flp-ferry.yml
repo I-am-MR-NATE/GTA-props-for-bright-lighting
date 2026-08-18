@@ -1,0 +1,59 @@
+name: Worker04 Real FLP Ferry
+
+on:
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Install official FL Studio and materialise exact source/candidate FLPs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $ProgressPreference='SilentlyContinue'
+          $installer=Join-Path $env:RUNNER_TEMP 'flstudio-latest.exe'
+          & curl.exe -L --fail --retry 2 --connect-timeout 30 -o $installer 'https://support.image-line.com/redirect/flstudio_win_installer'
+          if($LASTEXITCODE -ne 0){throw "curl failed: $LASTEXITCODE"}
+          $ip=Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
+          $fl=Get-ChildItem 'C:\Program Files\Image-Line' -Filter FL64.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if(-not $fl){throw "FL64 missing after installer exit $($ip.ExitCode)"}
+          $src=Join-Path (Split-Path -Parent $fl.FullName) 'Data\Templates\Advanced\Electronic\Drum & Bass.flp'
+          if(-not(Test-Path $src)){throw "factory template missing"}
+          $srcHash=(Get-FileHash $src -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($srcHash -ne '74b4b3fbab62a7e332c5087217ff7ea73a84b680424e015baa76e623216fde37'){throw "source hash mismatch $srcHash"}
+          $sourceOut=Join-Path $env:RUNNER_TEMP 'drum_and_bass_factory.flp'
+          Copy-Item $src $sourceOut -Force
+          $candidate=Join-Path $env:RUNNER_TEMP 'drum_and_bass_automation_candidate.flp'
+          Copy-Item $src $candidate -Force
+          [byte[]]$bytes=[IO.File]::ReadAllBytes($candidate)
+          $off=70076
+          [byte[]]$expected=0x60,0x66,0x66,0xe2
+          [byte[]]$replacement=0x00,0x00,0x00,0xd0
+          for($i=0;$i -lt 4;$i++){if($bytes[$off+$i] -ne $expected[$i]){throw "unexpected byte at $($off+$i)"}}
+          [Array]::Copy($replacement,0,$bytes,$off,4)
+          [IO.File]::WriteAllBytes($candidate,$bytes)
+          $candidateHash=(Get-FileHash $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($candidateHash -ne 'eb574ed41c7b1af3140d73b453661950524dadabec691c8d11393cad4bc63231'){throw "candidate hash mismatch $candidateHash"}
+          @(
+            "SOURCE_SHA256=$srcHash",
+            "SOURCE_BYTES=$((Get-Item $sourceOut).Length)",
+            "CANDIDATE_SHA256=$candidateHash",
+            "CANDIDATE_BYTES=$((Get-Item $candidate).Length)"
+          ) | Set-Content (Join-Path $env:RUNNER_TEMP 'identity.txt') -Encoding ascii
+
+      - name: Upload exact FLP bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker04-real-flp-bytes
+          path: |
+            ${{ runner.temp }}/drum_and_bass_factory.flp
+            ${{ runner.temp }}/drum_and_bass_automation_candidate.flp
+            ${{ runner.temp }}/identity.txt
+          if-no-files-found: error
+          retention-days: 1
