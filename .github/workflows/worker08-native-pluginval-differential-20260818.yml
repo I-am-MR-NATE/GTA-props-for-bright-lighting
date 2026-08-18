@@ -6,6 +6,11 @@ on:
       - mega-dan/worker08-native-pluginval-differential-20260818
     paths:
       - '.github/workflows/worker08-native-pluginval-differential-20260818.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/worker08-native-pluginval-differential-20260818.yml'
 
 permissions:
   contents: read
