@@ -1,0 +1,117 @@
+name: Worker08 Dock Right Exclusive Runtime Probe
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.worker08-dockright-exclusive-trigger'
+      - '.github/workflows/worker08-dockright-exclusive.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install current official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\w08dockright"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $installer="$out\flstudio-latest.exe"
+          curl.exe -L --fail --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 -A "MEGA-DAN-FLP-Builder/1.0" -o "$installer" "https://support.image-line.com/redirect/flstudio_win_installer"
+          if((Get-Item $installer).Length -lt 100MB){throw 'installer too small'}
+          $ih=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          $ip=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          $fl='C:\Program Files\Image-Line\FL Studio 2026\FL64.exe'
+          for($i=0;$i -lt 30 -and -not(Test-Path $fl);$i++){Start-Sleep 2}
+          if(-not(Test-Path $fl)){throw "FL64 missing after installer exit $($ip.ExitCode)"}
+          $fh=(Get-FileHash -Algorithm SHA256 $fl).Hash.ToLowerInvariant()
+          "installer_bytes=$((Get-Item $installer).Length)`ninstaller_sha256=$ih`ninstaller_exit_code=$($ip.ExitCode)`nfl64_sha256=$fh" | Set-Content -Encoding UTF8 "$out\install.txt"
+          "OUT=$out"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "FL64=$fl"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item -Force $installer
+
+      - name: Build mutually-exclusive dock-right candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $src='C:\Program Files\Image-Line\FL Studio 2026\Data\Templates\Minimal\Basic\Basic.flp'
+          $expected='c8a7a05cf39dcf8489a9cd67e31024602fe0dd910fcb941d52ca27ddb35c907f'
+          $sh=(Get-FileHash -Algorithm SHA256 $src).Hash.ToLowerInvariant()
+          if($sh -ne $expected){throw "stock Basic changed: $sh"}
+          $candidate="$env:OUT\Basic.dock_right_exclusive.flp"
+          [byte[]]$b=[IO.File]::ReadAllBytes($src)
+          $offset=41317
+          if($b[$offset] -ne 0x4c){throw ('unexpected Insert 1 flag byte 0x{0:x2}' -f $b[$offset])}
+          $before=$b[$offset]
+          $after=($before -band (-bnot 0x40)) -bor 0x80
+          if($after -ne 0x8c){throw ('unexpected derived byte 0x{0:x2}' -f $after)}
+          $b[$offset]=[byte]$after
+          [IO.File]::WriteAllBytes($candidate,$b)
+          $ch=(Get-FileHash -Algorithm SHA256 $candidate).Hash.ToLowerInvariant()
+          [ordered]@{source_sha256=$sh;candidate_sha256=$ch;source_bytes=(Get-Item $src).Length;candidate_bytes=(Get-Item $candidate).Length;flag_file_offset=$offset;raw_before=76;raw_after=140;raw_before_hex='0x4c';raw_after_hex='0x8c';dock_middle_before=$true;dock_middle_after=$false;dock_right_before=$false;dock_right_after=$true;changed_byte_count=1}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 "$env:OUT\build.json"
+          "SOURCE=$src"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Observe control and exclusive dock-right candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @'
+          using System;
+          using System.Text;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          public static class W08DockWin {
+            public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+            [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc cb, IntPtr lp);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
+            public static string Text(IntPtr h){var s=new StringBuilder(4096);GetWindowText(h,s,s.Capacity);return s.ToString();}
+          }
+          '@
+          function Shot([string]$path){$r=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;$bm=New-Object Drawing.Bitmap $r.Width,$r.Height;$g=[Drawing.Graphics]::FromImage($bm);$g.CopyFromScreen($r.Location,[Drawing.Point]::Empty,$r.Size);$bm.Save($path,[Drawing.Imaging.ImageFormat]::Png);$g.Dispose();$bm.Dispose()}
+          function Windows([int]$pid){$rows=New-Object Collections.Generic.List[object];$cb=[W08DockWin+EnumWindowsProc]{param($h,$l);$wp=0;[void][W08DockWin]::GetWindowThreadProcessId($h,[ref]$wp);if($wp -eq $pid -and [W08DockWin]::IsWindowVisible($h)){$children=New-Object Collections.Generic.List[string];$ccb=[W08DockWin+EnumWindowsProc]{param($ch,$cl);$t=[W08DockWin]::Text($ch);if($t){$children.Add($t)};return $true};[void][W08DockWin]::EnumChildWindows($h,$ccb,[IntPtr]::Zero);$rows.Add([pscustomobject]@{title=[W08DockWin]::Text($h);children=@($children)})};return $true};[void][W08DockWin]::EnumWindows($cb,[IntPtr]::Zero);return @($rows)}
+          function Probe([string]$label,[string]$project){
+            Get-Process FL64 -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;Start-Sleep 2
+            $before=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant()
+            $p=Start-Process -FilePath $env:FL64 -ArgumentList ('"'+$project+'"') -PassThru
+            Start-Sleep 16;$p.Refresh()
+            $w=New-Object -ComObject WScript.Shell;[void]$w.AppActivate($p.Id);Start-Sleep 1;[System.Windows.Forms.SendKeys]::SendWait('{ENTER}');Start-Sleep 4
+            [void]$w.AppActivate($p.Id);[System.Windows.Forms.SendKeys]::SendWait('{F9}');Start-Sleep 3
+            Shot "$env:OUT\$label.png";$p.Refresh();$wins=Windows $p.Id
+            $joined=(@($wins|ForEach-Object{$_.title})+@($wins|ForEach-Object{$_.children})|Out-String)
+            $errorText=($joined -match 'encountered an error|Access violation|needs to restart')
+            $after=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant()
+            $r=[ordered]@{label=$label;pid=$p.Id;title=$p.MainWindowTitle;responding=$p.Responding;exited=$p.HasExited;sha256_before=$before;sha256_after=$after;unchanged=($before -eq $after);error_dialog_detected=[bool]$errorText;windows=$wins}
+            $r|ConvertTo-Json -Depth 8|Set-Content -Encoding UTF8 "$env:OUT\$label.json"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue;Start-Sleep 2
+            return $r
+          }
+          $control=Probe 'control' $env:SOURCE
+          $candidate=Probe 'candidate' $env:CANDIDATE
+          [ordered]@{schema='worker08.dock-right-exclusive-runtime.v1';control=$control;candidate=$candidate;exclusive_dock_right_avoids_error=([bool]$candidate.responding -and -not [bool]$candidate.error_dialog_detected -and [bool]$candidate.unchanged)}|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 "$env:OUT\verdict.json"
+
+      - name: Remove project bytes and upload compact evidence
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Force "$env:OUT\*.flp" -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker08-dock-right-exclusive-runtime
+          path: ${{ env.OUT }}
+          retention-days: 2
+          if-no-files-found: error
