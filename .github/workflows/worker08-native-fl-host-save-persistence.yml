@@ -54,7 +54,7 @@ jobs:
           "SOURCE_SHA256=$srcHash" | Add-Content (Join-Path $env:RUNNER_TEMP 'install.txt')
           "CANDIDATE_SHA256=$candidateHash" | Add-Content (Join-Path $env:RUNNER_TEMP 'install.txt')
 
-      - name: Candidate-first long save differential
+      - name: Candidate-first lock-aware long save differential
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -66,9 +66,18 @@ jobs:
           [byte[]]$oldValue=0x00,0x00,0x00,0x60,0x66,0x66,0xe2,0x3f
           [byte[]]$newValue=0x00,0x00,0x00,0x00,0x00,0x00,0xd0,0x3f
           function FileState([string]$path){
-            if(-not(Test-Path $path)){return $null}
-            $it=Get-Item $path; [byte[]]$b=[IO.File]::ReadAllBytes($path)
-            [pscustomobject]@{sha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant();bytes=$it.Length;last_write_utc=$it.LastWriteTimeUtc.ToString('o');old_value_count=(HexCount $b $oldValue);new_value_count=(HexCount $b $newValue)}
+            if(-not(Test-Path $path)){return [pscustomobject]@{exists=$false}}
+            $it=Get-Item $path
+            $base=[ordered]@{exists=$true;bytes=$it.Length;last_write_utc=$it.LastWriteTimeUtc.ToString('o');sha256=$null;old_value_count=$null;new_value_count=$null;read_error=$null}
+            try{
+              [byte[]]$b=[IO.File]::ReadAllBytes($path)
+              $base.sha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              $base.old_value_count=(HexCount $b $oldValue)
+              $base.new_value_count=(HexCount $b $newValue)
+            }catch{
+              $base.read_error=$_.Exception.Message
+            }
+            [pscustomobject]$base
           }
           function ProcState {
             $ps=@(Get-Process FL64 -ErrorAction SilentlyContinue)
@@ -78,51 +87,49 @@ jobs:
           }
           function Case([string]$name,[string]$project){
             Stop-Fl
-            $backup=$project+'~'
-            Remove-Item $backup -Force -ErrorAction SilentlyContinue
+            $backup=$project+'~';Remove-Item $backup -Force -ErrorAction SilentlyContinue
             $before=FileState $project
-            $p=Start-Process $env:FL64_PATH -ArgumentList ('"'+$project+'"') -PassThru
+            [void](Start-Process $env:FL64_PATH -ArgumentList ('"'+$project+'"') -PassThru)
             Start-Sleep 12
             $open=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-open.png")
             $w=New-Object -ComObject WScript.Shell
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
-            Start-Sleep -Milliseconds 500; $w.SendKeys('{ENTER}'); Start-Sleep 4
-            $ready=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-ready.png")
+            Start-Sleep -Milliseconds 500;$w.SendKeys('{ENTER}');Start-Sleep 4
+            $ready=ProcState;Shot (Join-Path $env:RUNNER_TEMP "$name-ready.png")
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
-            Start-Sleep -Milliseconds 500; $w.SendKeys('^s')
+            Start-Sleep -Milliseconds 500;$w.SendKeys('^s')
             $timeline=@();$elapsed=0
             foreach($target in @(3,10,30,60,90)){
-              $wait=$target-$elapsed; if($wait -gt 0){Start-Sleep $wait}; $elapsed=$target
-              $state=[pscustomobject]@{seconds=$target;main=(FileState $project);backup=(FileState $backup);process=(ProcState)}
-              $timeline += $state
+              $wait=$target-$elapsed;if($wait -gt 0){Start-Sleep $wait};$elapsed=$target
+              $timeline += [pscustomobject]@{seconds=$target;main=(FileState $project);backup=(FileState $backup);process=(ProcState)}
               Shot (Join-Path $env:RUNNER_TEMP ("$name-save-{0:D2}s.png" -f $target))
             }
-            $after=FileState $project; $backupFinal=FileState $backup
-            $dir=@(Get-ChildItem (Split-Path -Parent $project) -File | Select-Object -ExpandProperty Name | Sort-Object)
+            $after=FileState $project;$backupFinal=FileState $backup
             Stop-Fl
-            $p2=Start-Process $env:FL64_PATH -ArgumentList ('"'+$project+'"') -PassThru
+            $post_kill_main=FileState $project;$post_kill_backup=FileState $backup
+            [void](Start-Process $env:FL64_PATH -ArgumentList ('"'+$project+'"') -PassThru)
             Start-Sleep 12
-            $reopen=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-reopen.png")
+            $reopen=ProcState;Shot (Join-Path $env:RUNNER_TEMP "$name-reopen.png")
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
-            Start-Sleep -Milliseconds 500; $w.SendKeys('{ENTER}'); Start-Sleep 5
-            $reopenAfter=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-reopen-after-enter.png")
+            Start-Sleep -Milliseconds 500;$w.SendKeys('{ENTER}');Start-Sleep 5
+            $reopenAfter=ProcState;Shot (Join-Path $env:RUNNER_TEMP "$name-reopen-after-enter.png")
             Stop-Fl
-            [pscustomobject]@{name=$name;before=$before;open_process=$open;ready_process=$ready;timeline=$timeline;after_90s=$after;backup_after_90s=$backupFinal;directory=$dir;reopen=$reopen;reopen_after_enter=$reopenAfter}
+            [pscustomobject]@{name=$name;before=$before;open_process=$open;ready_process=$ready;timeline=$timeline;after_90s=$after;backup_after_90s=$backupFinal;post_kill_main=$post_kill_main;post_kill_backup=$post_kill_backup;reopen=$reopen;reopen_after_enter=$reopenAfter}
           }
-          # Deliberately candidate first, reversing the prior run order to rule out first-run/second-run effects.
+          # Candidate first deliberately reverses v1 order to rule out first-run/second-run effects.
           $candidate=Case 'candidate' $env:CANDIDATE_PATH
           $control=Case 'control' $env:CONTROL_PATH
           $install=@{};Get-Content (Join-Path $env:RUNNER_TEMP 'install.txt')|ForEach-Object{$k,$v=$_.Split('=',2);$install[$k]=$v}
-          $out=[ordered]@{schema='worker08.native-fl-host-save-persistence.v2';runner_os=[Environment]::OSVersion.VersionString;order=@('candidate','control');installer=$install;mutation=[ordered]@{source_sha256='74b4b3fbab62a7e332c5087217ff7ea73a84b680424e015baa76e623216fde37';candidate_sha256='eb574ed41c7b1af3140d73b453661950524dadabec691c8d11393cad4bc63231';semantic='automation channel 7 Bass Auto point index 1 value 0.574999988079071 -> 0.25'};candidate=$candidate;control=$control}
-          $json=Join-Path $env:RUNNER_TEMP 'worker08-native-fl-host-save-persistence-v2.json';$out|ConvertTo-Json -Depth 12|Set-Content $json -Encoding utf8;Get-Content $json
+          $out=[ordered]@{schema='worker08.native-fl-host-save-persistence.v3';runner_os=[Environment]::OSVersion.VersionString;order=@('candidate','control');installer=$install;mutation=[ordered]@{source_sha256='74b4b3fbab62a7e332c5087217ff7ea73a84b680424e015baa76e623216fde37';candidate_sha256='eb574ed41c7b1af3140d73b453661950524dadabec691c8d11393cad4bc63231';semantic='automation channel 7 Bass Auto point index 1 value 0.574999988079071 -> 0.25'};candidate=$candidate;control=$control}
+          $json=Join-Path $env:RUNNER_TEMP 'worker08-native-fl-host-save-persistence-v3.json';$out|ConvertTo-Json -Depth 12|Set-Content $json -Encoding utf8;Get-Content $json
 
       - name: Upload evidence only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: worker08-native-fl-host-save-persistence-v2
+          name: worker08-native-fl-host-save-persistence-v3
           path: |
-            ${{ runner.temp }}/worker08-native-fl-host-save-persistence-v2.json
+            ${{ runner.temp }}/worker08-native-fl-host-save-persistence-v3.json
             ${{ runner.temp }}/install.txt
             ${{ runner.temp }}/candidate-*.png
             ${{ runner.temp }}/control-*.png
