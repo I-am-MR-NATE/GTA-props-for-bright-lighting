@@ -21,7 +21,7 @@ jobs:
           & curl.exe -L --fail --retry 2 --connect-timeout 30 -o $installer 'https://support.image-line.com/redirect/flstudio_win_installer'
           if($LASTEXITCODE -ne 0){throw "curl failed: $LASTEXITCODE"}
           $installerItem=Get-Item $installer
-          if($installerItem.Length -lt 100MB){throw "installer too small"}
+          if($installerItem.Length -lt 100MB){throw 'installer too small'}
           $installerHash=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           $ip=Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
           $fl=Get-ChildItem 'C:\Program Files\Image-Line' -Filter FL64.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -54,133 +54,77 @@ jobs:
           "SOURCE_SHA256=$srcHash" | Add-Content (Join-Path $env:RUNNER_TEMP 'install.txt')
           "CANDIDATE_SHA256=$candidateHash" | Add-Content (Join-Path $env:RUNNER_TEMP 'install.txt')
 
-      - name: Capture Image-Line registry baseline
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          cmd /c "reg query HKCU\Software\Image-Line /s" > "$env:RUNNER_TEMP\registry-before-hkcu.txt" 2>&1
-          cmd /c "reg query HKLM\Software\Image-Line /s" > "$env:RUNNER_TEMP\registry-before-hklm.txt" 2>&1
-          cmd /c "reg query HKLM\Software\WOW6432Node\Image-Line /s" > "$env:RUNNER_TEMP\registry-before-hklm32.txt" 2>&1
-
-      - name: Native host-save control and Builder candidate
+      - name: Candidate-first long save differential
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
           function Stop-Fl { Get-Process FL64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
-          function Shot([string]$p){
-            $b=[Windows.Forms.SystemInformation]::VirtualScreen
-            $bmp=New-Object Drawing.Bitmap $b.Width,$b.Height
-            $g=[Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size)
-            $bmp.Save($p,[Drawing.Imaging.ImageFormat]::Png)
-            $g.Dispose();$bmp.Dispose()
-          }
-          function HexCount([byte[]]$hay,[byte[]]$needle){
-            $n=0
-            for($i=0;$i -le $hay.Length-$needle.Length;$i++){
-              $ok=$true
-              for($j=0;$j -lt $needle.Length;$j++){if($hay[$i+$j] -ne $needle[$j]){$ok=$false;break}}
-              if($ok){$n++}
-            }
-            return $n
-          }
-          function Snapshot([string]$project){
-            $it=Get-Item $project
-            [pscustomobject]@{sha256=(Get-FileHash $project -Algorithm SHA256).Hash.ToLowerInvariant();bytes=$it.Length;last_write_utc=$it.LastWriteTimeUtc.ToString('o')}
+          function Shot([string]$p){$b=[Windows.Forms.SystemInformation]::VirtualScreen;$bmp=New-Object Drawing.Bitmap $b.Width,$b.Height;$g=[Drawing.Graphics]::FromImage($bmp);$g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size);$bmp.Save($p,[Drawing.Imaging.ImageFormat]::Png);$g.Dispose();$bmp.Dispose()}
+          function HexCount([byte[]]$hay,[byte[]]$needle){$n=0;for($i=0;$i -le $hay.Length-$needle.Length;$i++){$ok=$true;for($j=0;$j -lt $needle.Length;$j++){if($hay[$i+$j] -ne $needle[$j]){$ok=$false;break}};if($ok){$n++}};return $n}
+          [byte[]]$oldValue=0x00,0x00,0x00,0x60,0x66,0x66,0xe2,0x3f
+          [byte[]]$newValue=0x00,0x00,0x00,0x00,0x00,0x00,0xd0,0x3f
+          function FileState([string]$path){
+            if(-not(Test-Path $path)){return $null}
+            $it=Get-Item $path; [byte[]]$b=[IO.File]::ReadAllBytes($path)
+            [pscustomobject]@{sha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant();bytes=$it.Length;last_write_utc=$it.LastWriteTimeUtc.ToString('o');old_value_count=(HexCount $b $oldValue);new_value_count=(HexCount $b $newValue)}
           }
           function ProcState {
             $ps=@(Get-Process FL64 -ErrorAction SilentlyContinue)
-            @($ps|ForEach-Object{
-              $mods=@()
-              try{$mods=@($_.Modules|ForEach-Object{$_.FileName}|Sort-Object -Unique)}catch{}
-              [pscustomobject]@{id=$_.Id;responding=$_.Responding;title=$_.MainWindowTitle;module_count=$mods.Count;modules=$mods}
-            })
+            if($ps.Count -eq 0){return $null}
+            $p=$ps[0];$mods=@();try{$mods=@($p.Modules|ForEach-Object{$_.FileName}|Sort-Object -Unique)}catch{}
+            [pscustomobject]@{id=$p.Id;responding=$p.Responding;title=$p.MainWindowTitle;cpu_seconds=$p.CPU;working_set=$p.WorkingSet64;module_count=$mods.Count;modules=$mods}
           }
-          function RunCase([string]$name,[string]$project){
+          function Case([string]$name,[string]$project){
             Stop-Fl
-            $before=Snapshot $project
-            $dir=Split-Path -Parent $project
-            $beforeNames=@(Get-ChildItem $dir -File | Select-Object -ExpandProperty Name | Sort-Object)
+            $backup=$project+'~'
+            Remove-Item $backup -Force -ErrorAction SilentlyContinue
+            $before=FileState $project
             $p=Start-Process $env:FL64_PATH -ArgumentList ('"'+$project+'"') -PassThru
             Start-Sleep 12
-            $initial=ProcState
-            Shot (Join-Path $env:RUNNER_TEMP "$name-open.png")
+            $open=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-open.png")
             $w=New-Object -ComObject WScript.Shell
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
-            Start-Sleep -Milliseconds 500
-            $w.SendKeys('{ENTER}')
-            Start-Sleep 4
-            $afterEnter=ProcState
-            Shot (Join-Path $env:RUNNER_TEMP "$name-before-save.png")
+            Start-Sleep -Milliseconds 500; $w.SendKeys('{ENTER}'); Start-Sleep 4
+            $ready=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-ready.png")
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
-            Start-Sleep -Milliseconds 500
-            $w.SendKeys('^s')
-            Start-Sleep 12
-            $afterSaveUi=ProcState
-            Shot (Join-Path $env:RUNNER_TEMP "$name-after-save.png")
-            $after=Snapshot $project
-            $afterNames=@(Get-ChildItem $dir -File | Select-Object -ExpandProperty Name | Sort-Object)
-            [byte[]]$saved=[IO.File]::ReadAllBytes($project)
-            [byte[]]$old=0x00,0x00,0x00,0x60,0x66,0x66,0xe2,0x3f
-            [byte[]]$new=0x00,0x00,0x00,0x00,0x00,0x00,0xd0,0x3f
-            $counts=[pscustomobject]@{old_value_double=(HexCount $saved $old);new_value_double=(HexCount $saved $new)}
+            Start-Sleep -Milliseconds 500; $w.SendKeys('^s')
+            $timeline=@();$elapsed=0
+            foreach($target in @(3,10,30,60,90)){
+              $wait=$target-$elapsed; if($wait -gt 0){Start-Sleep $wait}; $elapsed=$target
+              $state=[pscustomobject]@{seconds=$target;main=(FileState $project);backup=(FileState $backup);process=(ProcState)}
+              $timeline += $state
+              Shot (Join-Path $env:RUNNER_TEMP ("$name-save-{0:D2}s.png" -f $target))
+            }
+            $after=FileState $project; $backupFinal=FileState $backup
+            $dir=@(Get-ChildItem (Split-Path -Parent $project) -File | Select-Object -ExpandProperty Name | Sort-Object)
             Stop-Fl
             $p2=Start-Process $env:FL64_PATH -ArgumentList ('"'+$project+'"') -PassThru
             Start-Sleep 12
-            $reopenInitial=ProcState
-            Shot (Join-Path $env:RUNNER_TEMP "$name-reopen-before-enter.png")
+            $reopen=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-reopen.png")
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
-            Start-Sleep -Milliseconds 500
-            $w.SendKeys('{ENTER}')
-            Start-Sleep 5
-            $reopenAfterEnter=ProcState
-            Shot (Join-Path $env:RUNNER_TEMP "$name-reopen-after-enter.png")
+            Start-Sleep -Milliseconds 500; $w.SendKeys('{ENTER}'); Start-Sleep 5
+            $reopenAfter=ProcState; Shot (Join-Path $env:RUNNER_TEMP "$name-reopen-after-enter.png")
             Stop-Fl
-            [pscustomobject]@{
-              name=$name;before=$before;after_save=$after;value_sequence_counts_after_save=$counts;
-              initial_process=$initial;after_enter_process=$afterEnter;after_ctrl_s_process=$afterSaveUi;
-              directory_before=$beforeNames;directory_after=$afterNames;
-              clean_reopen_initial=$reopenInitial;clean_reopen_after_enter=$reopenAfterEnter
-            }
+            [pscustomobject]@{name=$name;before=$before;open_process=$open;ready_process=$ready;timeline=$timeline;after_90s=$after;backup_after_90s=$backupFinal;directory=$dir;reopen=$reopen;reopen_after_enter=$reopenAfter}
           }
-          $control=RunCase 'control' $env:CONTROL_PATH
-          $candidate=RunCase 'candidate' $env:CANDIDATE_PATH
-          $install=@{}
-          Get-Content (Join-Path $env:RUNNER_TEMP 'install.txt') | ForEach-Object { $k,$v=$_.Split('=',2);$install[$k]=$v }
-          $out=[ordered]@{
-            schema='worker08.native-fl-host-save-persistence.v1';
-            runner_os=[Environment]::OSVersion.VersionString;
-            installer=$install;
-            mutation=[ordered]@{source_sha256='74b4b3fbab62a7e332c5087217ff7ea73a84b680424e015baa76e623216fde37';candidate_sha256='eb574ed41c7b1af3140d73b453661950524dadabec691c8d11393cad4bc63231';semantic='automation channel 7 Bass Auto point index 1 value 0.574999988079071 -> 0.25';changed_offsets=@(70076,70077,70078,70079);before_hex='606666e2';after_hex='000000d0'};
-            control=$control;candidate=$candidate
-          }
-          $json=Join-Path $env:RUNNER_TEMP 'worker08-native-fl-host-save-persistence.json'
-          $out|ConvertTo-Json -Depth 10|Set-Content $json -Encoding utf8
-          Get-Content $json
-
-      - name: Capture Image-Line registry after experiment
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          cmd /c "reg query HKCU\Software\Image-Line /s" > "$env:RUNNER_TEMP\registry-after-hkcu.txt" 2>&1
-          cmd /c "reg query HKLM\Software\Image-Line /s" > "$env:RUNNER_TEMP\registry-after-hklm.txt" 2>&1
-          cmd /c "reg query HKLM\Software\WOW6432Node\Image-Line /s" > "$env:RUNNER_TEMP\registry-after-hklm32.txt" 2>&1
-          Compare-Object (Get-Content "$env:RUNNER_TEMP\registry-before-hkcu.txt") (Get-Content "$env:RUNNER_TEMP\registry-after-hkcu.txt") | Out-File "$env:RUNNER_TEMP\registry-hkcu-diff.txt"
-          Compare-Object (Get-Content "$env:RUNNER_TEMP\registry-before-hklm.txt") (Get-Content "$env:RUNNER_TEMP\registry-after-hklm.txt") | Out-File "$env:RUNNER_TEMP\registry-hklm-diff.txt"
-          Compare-Object (Get-Content "$env:RUNNER_TEMP\registry-before-hklm32.txt") (Get-Content "$env:RUNNER_TEMP\registry-after-hklm32.txt") | Out-File "$env:RUNNER_TEMP\registry-hklm32-diff.txt"
+          # Deliberately candidate first, reversing the prior run order to rule out first-run/second-run effects.
+          $candidate=Case 'candidate' $env:CANDIDATE_PATH
+          $control=Case 'control' $env:CONTROL_PATH
+          $install=@{};Get-Content (Join-Path $env:RUNNER_TEMP 'install.txt')|ForEach-Object{$k,$v=$_.Split('=',2);$install[$k]=$v}
+          $out=[ordered]@{schema='worker08.native-fl-host-save-persistence.v2';runner_os=[Environment]::OSVersion.VersionString;order=@('candidate','control');installer=$install;mutation=[ordered]@{source_sha256='74b4b3fbab62a7e332c5087217ff7ea73a84b680424e015baa76e623216fde37';candidate_sha256='eb574ed41c7b1af3140d73b453661950524dadabec691c8d11393cad4bc63231';semantic='automation channel 7 Bass Auto point index 1 value 0.574999988079071 -> 0.25'};candidate=$candidate;control=$control}
+          $json=Join-Path $env:RUNNER_TEMP 'worker08-native-fl-host-save-persistence-v2.json';$out|ConvertTo-Json -Depth 12|Set-Content $json -Encoding utf8;Get-Content $json
 
       - name: Upload evidence only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: worker08-native-fl-host-save-persistence
+          name: worker08-native-fl-host-save-persistence-v2
           path: |
-            ${{ runner.temp }}/worker08-native-fl-host-save-persistence.json
+            ${{ runner.temp }}/worker08-native-fl-host-save-persistence-v2.json
             ${{ runner.temp }}/install.txt
-            ${{ runner.temp }}/registry-*.txt
-            ${{ runner.temp }}/control-*.png
             ${{ runner.temp }}/candidate-*.png
+            ${{ runner.temp }}/control-*.png
           if-no-files-found: warn
           retention-days: 1
