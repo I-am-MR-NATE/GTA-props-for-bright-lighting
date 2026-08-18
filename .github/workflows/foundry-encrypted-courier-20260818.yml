@@ -1,0 +1,100 @@
+name: FLP Encrypted Foundry Courier 20260818
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.foundry-encrypted-courier-trigger'
+      - 'foundry_request_key.b64'
+      - 'foundry_request_data.b64'
+
+permissions:
+  contents: read
+
+jobs:
+  courier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Generate ephemeral request keypair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/courier/pub" "$RUNNER_TEMP/courier/work"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$RUNNER_TEMP/courier/request-private.pem" >/dev/null 2>&1
+          openssl pkey -in "$RUNNER_TEMP/courier/request-private.pem" -pubout -out "$RUNNER_TEMP/courier/pub/request-public.pem"
+          printf 'run_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$RUNNER_TEMP/courier/pub/KEY_RECEIPT.txt"
+
+      - name: Publish public request key only
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-courier-request-public-key
+          path: ${{ runner.temp }}/courier/pub
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Wait for encrypted request
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -Eeuo pipefail
+          base="https://raw.githubusercontent.com/I-am-MR-NATE/GTA-props-for-bright-lighting/${HEAD_REF}"
+          for n in $(seq 1 120); do
+            if curl -fsSL "$base/foundry_request_key.b64" -o "$RUNNER_TEMP/courier/work/request_key.b64" && \
+               curl -fsSL "$base/foundry_request_data.b64" -o "$RUNNER_TEMP/courier/work/request_data.b64"; then
+              test -s "$RUNNER_TEMP/courier/work/request_key.b64"
+              test -s "$RUNNER_TEMP/courier/work/request_data.b64"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'encrypted request did not arrive' >&2
+          exit 2
+
+      - name: Decrypt request fetch exact private helpers and encrypt result
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$RUNNER_TEMP/courier/work"
+          out="$RUNNER_TEMP/courier/out"
+          mkdir -p "$out/vst2-x64" "$out/vst2-x86" "$RUNNER_TEMP/courier/result"
+          base64 -d "$work/request_key.b64" > "$work/request_key.enc"
+          openssl pkeyutl -decrypt -inkey "$RUNNER_TEMP/courier/request-private.pem" -in "$work/request_key.enc" -out "$work/request_pass.txt" \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          base64 -d "$work/request_data.b64" > "$work/request_data.enc"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$work/request_data.enc" -out "$work/request.json" -pass file:"$work/request_pass.txt"
+          python3 - "$work/request.json" "$out" "$work/output_pass.txt" <<'PY'
+          import hashlib, json, pathlib, sys, urllib.request
+          req=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          root=pathlib.Path(sys.argv[2])
+          pathlib.Path(sys.argv[3]).write_text(req['output_pass'])
+          for a in req['assets']:
+              target=root/a['path']; target.parent.mkdir(parents=True, exist_ok=True)
+              r=urllib.request.Request(a['url'], headers={'User-Agent':'MEGA-DAN-encrypted-courier/1'})
+              with urllib.request.urlopen(r, timeout=120) as src, target.open('wb') as dst:
+                  h=hashlib.sha256(); total=0
+                  while True:
+                      b=src.read(8*1024*1024)
+                      if not b: break
+                      dst.write(b); h.update(b); total+=len(b)
+              if total != a['bytes'] or h.hexdigest() != a['sha256']:
+                  raise SystemExit(f"identity mismatch {a['path']} bytes={total} sha={h.hexdigest()}")
+          PY
+          find "$out" -type f -print0 | sort -z | xargs -0 sha256sum > "$out/BINARY_SHA256SUMS.txt"
+          tar -C "$out" -cf "$work/foundry-authoritative.tar" .
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$work/foundry-authoritative.tar" \
+            -out "$RUNNER_TEMP/courier/result/foundry-authoritative.tar.enc" -pass file:"$work/output_pass.txt"
+          sha256sum "$RUNNER_TEMP/courier/result/foundry-authoritative.tar.enc" > "$RUNNER_TEMP/courier/result/CIPHERTEXT_SHA256.txt"
+          printf 'status=ENCRYPTED_HELPERS_READY\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$RUNNER_TEMP/courier/result/SAFE_RECEIPT.txt"
+          rm -f "$work/request_pass.txt" "$work/output_pass.txt" "$work/request.json" "$work/foundry-authoritative.tar" "$RUNNER_TEMP/courier/request-private.pem"
+
+      - name: Upload ciphertext only
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-courier-encrypted-result
+          path: ${{ runner.temp }}/courier/result
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
