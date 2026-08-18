@@ -13,118 +13,95 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 35
     steps:
-      - name: Download and install current FL Studio
+      - name: Install current FL Studio and bind component bytes
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $out = Join-Path $env:RUNNER_TEMP 'flstudio-latest.exe'
-          Invoke-WebRequest -UseBasicParsing 'https://support.image-line.com/redirect/flstudio_win_installer' -OutFile $out
-          $size = (Get-Item $out).Length
-          if ($size -lt 100MB) { throw "FL installer implausibly small: $size" }
-          $mz = [System.IO.File]::ReadAllBytes($out)[0..1]
-          if ($mz[0] -ne 0x4d -or $mz[1] -ne 0x5a) { throw 'FL installer missing MZ signature' }
-          $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()
-          "installer=$out" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "installer_sha=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "installer_size=$size" | Out-File -FilePath $env:GITHUB_ENV -Append
-          $p = Start-Process -FilePath $out -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
-          "installer_exit=$($p.ExitCode)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $obs = Join-Path $env:RUNNER_TEMP 'obs'
+          New-Item -ItemType Directory -Force -Path $obs | Out-Null
+          $installer = Join-Path $env:RUNNER_TEMP 'flstudio-latest.exe'
+          $effective = & curl.exe -L --fail --silent --show-error -o $installer -w '%{url_effective}' 'https://support.image-line.com/redirect/flstudio_win_installer'
+          if ($LASTEXITCODE -ne 0) { throw "curl installer failed: $LASTEXITCODE" }
+          $size = (Get-Item $installer).Length
+          if ($size -lt 100MB) { throw "installer implausibly small: $size" }
+          $bytes = [System.IO.File]::ReadAllBytes($installer)
+          if ($bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'installer missing MZ' }
+          $installerSha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $ip = Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
           Start-Sleep -Seconds 5
           $fl = Get-ChildItem 'C:\Program Files\Image-Line' -Recurse -Filter FL64.exe -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
-          if (-not $fl) { throw 'FL64.exe not found after silent install' }
+          if (-not $fl) { throw 'FL64.exe not found' }
+          $root = Split-Path -Parent $fl.FullName
+          $tuner = Get-ChildItem $root -Recurse -Filter engine_x64.dll -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\Tuner\\' } | Select-Object -First 1
+          if (-not $tuner) { throw 'Tuner engine_x64.dll not found' }
+          $state = [ordered]@{
+            observed_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+            runner_os = [System.Environment]::OSVersion.VersionString
+            installer_effective_url = $effective
+            installer_bytes = $size
+            installer_sha256 = $installerSha
+            installer_exit = $ip.ExitCode
+            fl64_path = $fl.FullName
+            fl64_bytes = $fl.Length
+            fl64_sha256 = (Get-FileHash $fl.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            fl64_file_version = $fl.VersionInfo.FileVersion
+            tuner_path = $tuner.FullName
+            tuner_bytes = $tuner.Length
+            tuner_file_version = $tuner.VersionInfo.FileVersion
+            tuner_last_write_utc_before = $tuner.LastWriteTimeUtc.ToString('o')
+            tuner_sha256_before_pluginval = (Get-FileHash $tuner.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $state | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$obs\hash_stability_pre.json"
+          "obs=$obs" | Out-File -FilePath $env:GITHUB_ENV -Append
           "fl64=$($fl.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "fl64_sha=$((Get-FileHash $fl.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "fl64_version=$($fl.VersionInfo.FileVersion)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "tuner=$($tuner.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Materialise pluginval 1.0.4
+      - name: Validate Tuner natively and prove no DLL mutation
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $zip = Join-Path $env:RUNNER_TEMP 'pluginval_Windows.zip'
           $dir = Join-Path $env:RUNNER_TEMP 'pluginval'
           Invoke-WebRequest -UseBasicParsing 'https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip' -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $dir -Force
           $pv = Get-ChildItem $dir -Recurse -Filter pluginval.exe | Select-Object -First 1
-          if (-not $pv) { throw 'pluginval.exe missing' }
-          "pluginval=$($pv.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "pluginval_sha=$((Get-FileHash $pv.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Run native Windows plug-in identity controls
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $root = Split-Path -Parent $env:fl64
-          $tuner = Get-ChildItem $root -Recurse -Filter engine_x64.dll -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\Tuner\\' } | Select-Object -First 1
-          $audio32 = Get-ChildItem $root -Recurse -Filter AudioRestore.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\obs" | Out-Null
-          if ($tuner) {
-            & $env:pluginval --validate-in-process --strictness-level 5 --output-dir "$env:RUNNER_TEMP\obs" $tuner.FullName *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\obs\pluginval_tuner.txt"
-            $rc = $LASTEXITCODE
-            "tuner_path=$($tuner.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "tuner_sha=$((Get-FileHash $tuner.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "tuner_pluginval_exit=$rc" | Out-File -FilePath $env:GITHUB_ENV -Append
-          } else { "tuner_pluginval_exit=not_found" | Out-File -FilePath $env:GITHUB_ENV -Append }
-          if ($audio32) {
-            & $env:pluginval --validate-in-process --strictness-level 5 --output-dir "$env:RUNNER_TEMP\obs" $audio32.FullName *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\obs\pluginval_audiorestore_x86.txt"
-            $rc2 = $LASTEXITCODE
-            "audio32_path=$($audio32.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "audio32_sha=$((Get-FileHash $audio32.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "audio32_pluginval_exit=$rc2" | Out-File -FilePath $env:GITHUB_ENV -Append
-          } else { "audio32_pluginval_exit=not_found" | Out-File -FilePath $env:GITHUB_ENV -Append }
+          & $pv.FullName --validate-in-process --strictness-level 5 --output-dir $env:obs $env:tuner *>&1 | Tee-Object -FilePath "$env:obs\pluginval_tuner.txt"
+          $rc = $LASTEXITCODE
+          $pre = Get-Content "$env:obs\hash_stability_pre.json" -Raw | ConvertFrom-Json
+          $post = [ordered]@{
+            pluginval_sha256 = (Get-FileHash $pv.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            pluginval_exit = $rc
+            tuner_sha256_before_pluginval = $pre.tuner_sha256_before_pluginval
+            tuner_sha256_after_pluginval = (Get-FileHash $env:tuner -Algorithm SHA256).Hash.ToLowerInvariant()
+            tuner_last_write_utc_after_pluginval = (Get-Item $env:tuner).LastWriteTimeUtc.ToString('o')
+          }
+          $post | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$env:obs\hash_stability_pluginval.json"
           exit 0
 
-      - name: Launch FL Studio and capture live native process state
+      - name: Launch FL Studio and prove Tuner bytes remain stable
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $obs = "$env:RUNNER_TEMP\obs"
-          $beforeFiles = @(Get-ChildItem "$env:USERPROFILE\Documents\Image-Line" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
           $p = Start-Process -FilePath $env:fl64 -PassThru
           Start-Sleep -Seconds 15
           $live = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-          $modules = @()
-          if ($live) {
-            try { $modules = @($live.Modules | ForEach-Object { $_.FileName } | Sort-Object -Unique) } catch {}
-          }
-          $afterFiles = @(Get-ChildItem "$env:USERPROFILE\Documents\Image-Line" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-          $newFiles = @($afterFiles | Where-Object { $_ -notin $beforeFiles })
-          $reg = @()
-          foreach ($k in @('HKCU:\Software\Image-Line','HKLM:\SOFTWARE\Image-Line','HKLM:\SOFTWARE\WOW6432Node\Image-Line')) {
-            if (Test-Path $k) { $reg += (Get-ChildItem $k -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
-          }
           $state = [ordered]@{
-            observed_at_utc = (Get-Date).ToUniversalTime().ToString('o')
-            runner_os = [System.Environment]::OSVersion.VersionString
-            installer_sha256 = $env:installer_sha
-            installer_size = [int64]$env:installer_size
-            installer_exit = $env:installer_exit
-            fl64_path = $env:fl64
-            fl64_sha256 = $env:fl64_sha
-            fl64_file_version = $env:fl64_version
             fl_process_started = [bool]$live
-            fl_pid = if ($live) { $live.Id } else { $p.Id }
             fl_main_window_handle = if ($live) { $live.MainWindowHandle.ToInt64() } else { 0 }
             fl_responding = if ($live) { $live.Responding } else { $false }
-            module_count = $modules.Count
-            modules = $modules
-            new_user_files = $newFiles
-            image_line_registry_keys = @($reg | Sort-Object -Unique)
-            pluginval_sha256 = $env:pluginval_sha
-            tuner_path = $env:tuner_path
-            tuner_sha256 = $env:tuner_sha
-            tuner_pluginval_exit = $env:tuner_pluginval_exit
-            audiorestore_x86_path = $env:audio32_path
-            audiorestore_x86_sha256 = $env:audio32_sha
-            audiorestore_x86_pluginval_exit = $env:audio32_pluginval_exit
+            tuner_sha256_after_fl_launch = (Get-FileHash $env:tuner -Algorithm SHA256).Hash.ToLowerInvariant()
+            tuner_last_write_utc_after_fl_launch = (Get-Item $env:tuner).LastWriteTimeUtc.ToString('o')
           }
-          $state | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 "$obs\native_fl_runtime_observation.json"
+          $state | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$env:obs\hash_stability_fl_launch.json"
           if ($live) { Stop-Process -Id $live.Id -Force -ErrorAction SilentlyContinue }
-          Get-Content "$obs\native_fl_runtime_observation.json"
+          Get-Content "$env:obs\hash_stability_pre.json"
+          Get-Content "$env:obs\hash_stability_pluginval.json"
+          Get-Content "$env:obs\hash_stability_fl_launch.json"
 
-      - name: Upload observation artifact
+      - name: Upload hash-stability artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mega-dan-fl-native-runtime-observation-20260818
+          name: mega-dan-fl-native-hash-stability-20260818
           path: ${{ runner.temp }}/obs
           if-no-files-found: error
           retention-days: 3
