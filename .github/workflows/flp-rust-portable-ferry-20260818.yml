@@ -5,6 +5,10 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/flp-rust-portable-ferry-20260818.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.flp-rust-portable-ferry-trigger'
 
 permissions:
   contents: read
@@ -47,7 +51,6 @@ jobs:
           compression-level: 1
           retention-days: 1
           if-no-files-found: error
-
       - name: Upload part 00
         uses: actions/upload-artifact@v4
         with: {name: flp-rust-portable-part-00, path: '${{ runner.temp }}/flp-rust-ferry/parts/rust-stable.part.00.bin', compression-level: 0, retention-days: 1, if-no-files-found: ignore}
