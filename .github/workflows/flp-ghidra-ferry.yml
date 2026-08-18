@@ -1,0 +1,37 @@
+name: FLP Ghidra 12.1.2 Ferry
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-ghidra-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download exact official Ghidra release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          url='https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip'
+          expected='b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d'
+          curl -fL --retry 4 --retry-all-errors -o ghidra_12.1.2_PUBLIC_20260605.zip "$url"
+          got="$(sha256sum ghidra_12.1.2_PUBLIC_20260605.zip | awk '{print $1}')"
+          test "$got" = "$expected"
+          printf 'url=%s\nsha256=%s\nbytes=%s\n' "$url" "$got" "$(stat -c %s ghidra_12.1.2_PUBLIC_20260605.zip)" > GHIDRA_FERRY_RECEIPT.txt
+      - name: Upload verified Ghidra
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-ghidra-12.1.2-verified
+          path: |
+            ghidra_12.1.2_PUBLIC_20260605.zip
+            GHIDRA_FERRY_RECEIPT.txt
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
