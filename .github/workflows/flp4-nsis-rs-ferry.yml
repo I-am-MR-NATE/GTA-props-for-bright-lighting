@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Build exact nsis-rs extractor
+      - name: Build exact nsis-rs plus bounded Image-Line header probe
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -26,16 +26,31 @@ jobs:
           cargo test --locked 2>&1 | tee ../TEST_LOG.txt
           cargo build --locked --release --example dump
           mkdir -p ../artifact
-          cp target/release/examples/dump ../artifact/nsis-rs-dump
-          chmod +x ../artifact/nsis-rs-dump
-          ../artifact/nsis-rs-dump --help > ../artifact/HELP.txt 2>&1 || true
-          sha256sum ../artifact/nsis-rs-dump > ../artifact/SHA256SUMS.txt
+          cp target/release/examples/dump ../artifact/nsis-rs-dump-stock
+
+          # Image-Line's current installer carries exact NullsoftInst magic and
+          # coherent FirstHeader lengths, but uses extension bits 0x10|0x20.
+          # Widen only the structural flag mask; leave all decoding logic intact.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/header/firstheader.rs')
+          s=p.read_text()
+          old='pub const FH_FLAGS_MASK: u32 = 0x0F;'
+          new='pub const FH_FLAGS_MASK: u32 = 0x3F;'
+          assert old in s
+          p.write_text(s.replace(old,new,1))
+          PY
+          git diff -- src/header/firstheader.rs > ../artifact/IMAGE_LINE_FLAG_MASK.patch
+          cargo build --locked --release --example dump
+          cp target/release/examples/dump ../artifact/nsis-rs-dump-imageline
+          chmod +x ../artifact/nsis-rs-dump-*
+          sha256sum ../artifact/nsis-rs-dump-* > ../artifact/SHA256SUMS.txt
           git archive --format=tar.gz --output=../artifact/nsis-rs-361796dd.tar.gz HEAD
-          printf 'upstream=ATRAPSLLC/nsis-rs\ncommit=361796dd57891c9d796772a8103f7f6dbc8a1d0a\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > ../artifact/RECEIPT.txt
+          printf 'upstream=ATRAPSLLC/nsis-rs\ncommit=361796dd57891c9d796772a8103f7f6dbc8a1d0a\nchange=FH_FLAGS_MASK_0x0F_to_0x3F_only\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > ../artifact/RECEIPT.txt
           cp ../TEST_LOG.txt ../artifact/TEST_LOG.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: flp4-nsis-rs-361796dd
+          name: flp4-nsis-rs-imageline-probe
           path: artifact
           compression-level: 1
           retention-days: 1
