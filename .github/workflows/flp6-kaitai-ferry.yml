@@ -1,0 +1,42 @@
+name: FLP6 Kaitai Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp6-kaitai-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kaitai:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Acquire exact Kaitai 0.11 compiler and pinned source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _kaitai/compiler _kaitai/source
+          compiler_url='https://github.com/kaitai-io/kaitai_struct_compiler/releases/download/0.11/kaitai-struct-compiler-0.11.zip'
+          compiler_sha='ff89389d9dc9e770d78a24af328763cb1f8e7b31ce7766c9edf10669a060f2a2'
+          pinned='60ef87aba09a7031153a81c67b8189b5b48b9a59'
+          curl --fail --location --retry 5 --retry-all-errors "$compiler_url" -o _kaitai/compiler/kaitai-struct-compiler-0.11.zip
+          printf '%s  %s\n' "$compiler_sha" '_kaitai/compiler/kaitai-struct-compiler-0.11.zip' | sha256sum -c -
+          git clone --quiet https://github.com/kaitai-io/kaitai_struct_compiler.git _kaitai/source/repo
+          git -C _kaitai/source/repo checkout --quiet "$pinned"
+          test "$(git -C _kaitai/source/repo rev-parse HEAD)" = "$pinned"
+          git -C _kaitai/source/repo archive --format=tar.gz --prefix="kaitai_struct_compiler-$pinned/" "$pinned" > "_kaitai/source/kaitai_struct_compiler-$pinned.tar.gz"
+          rm -rf _kaitai/source/repo
+          sha256sum _kaitai/compiler/kaitai-struct-compiler-0.11.zip _kaitai/source/*.tar.gz > _kaitai/SHA256SUMS.txt
+          printf 'version=0.11\npinned_commit=%s\ncompiler_expected_sha256=%s\nhead=%s\nrun_id=%s\n' "$pinned" "$compiler_sha" "$GITHUB_SHA" "$GITHUB_RUN_ID" > _kaitai/RECEIPT.txt
+      - name: Upload Kaitai
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp6-kaitai-0.11
+          path: _kaitai
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
