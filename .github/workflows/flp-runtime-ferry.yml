@@ -5,6 +5,10 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/flp-runtime-ferry.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-runtime-ferry.yml'
   workflow_dispatch:
 
 permissions:
