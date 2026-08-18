@@ -32,8 +32,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          rm -rf out _src
-          mkdir -p out/pyflp_site out/flpdiff out/ts-flp _src
+          rm -rf out _src python311
+          mkdir -p out/pyflp_site out/flpdiff out/ts-flp _src python311
 
           python -m pip install --disable-pip-version-check --no-compile --target out/pyflp_site 'pyflp==2.2.1'
           PYTHONPATH="$PWD/out/pyflp_site" python - <<'PY'
@@ -42,6 +42,14 @@ jobs:
           print('pyflp', md.version('pyflp'), pyflp.__file__)
           assert md.version('pyflp') == '2.2.1'
           PY
+
+          # Carry a relocatable copy of the setup-python 3.11 runtime so the
+          # exact PyFLP pin can execute on workers whose system Python is newer.
+          PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+          cp -a "$PY_PREFIX/bin" python311/
+          cp -a "$PY_PREFIX/lib" python311/
+          find python311 -type d \( -name '__pycache__' -o -name 'test' -o -name 'tests' \) -prune -exec rm -rf {} + || true
+          python311/bin/python3.11 --version
 
           git clone --filter=blob:none https://github.com/dawhubapp/flpdiff.git _src/flpdiff
           git -C _src/flpdiff checkout --detach df4faf3297ab49d674cc53502a9691b8c2d68dad
@@ -60,20 +68,32 @@ jobs:
           (cd _src/ts-flp && pnpm install --frozen-lockfile && pnpm run build)
           cp -a _src/ts-flp/dist out/ts-flp/dist
           cp -a _src/ts-flp/src out/ts-flp/src
+          cp -a _src/ts-flp/node_modules out/ts-flp/node_modules
           cp _src/ts-flp/index.ts _src/ts-flp/package.json _src/ts-flp/pnpm-lock.yaml out/ts-flp/
           printf '%s\n' '0fe4ef5db4fc4b62733a061109247907a8c68795' > out/ts-flp/COMMIT.txt
 
-          find out -type f -print0 | sort -z | xargs -0 sha256sum > out/SHA256SUMS.txt
           python --version > out/PYTHON_VERSION.txt
           node --version > out/NODE_VERSION.txt
           bun --version > out/BUN_VERSION.txt
           printf 'pyflp=2.2.1\nflpdiff_commit=df4faf3297ab49d674cc53502a9691b8c2d68dad\nts_flp_commit=0fe4ef5db4fc4b62733a061109247907a8c68795\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/RECEIPT.txt
+          find out -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > out/SHA256SUMS.txt
+          find python311 -type f -print0 | sort -z | xargs -0 sha256sum > python311/SHA256SUMS.txt
+          du -sh out python311
 
       - name: Upload exact parser runtime
         uses: actions/upload-artifact@v4
         with:
-          name: flp-parser-runtime-exact
+          name: flp-parser-runtime-exact-v2
           path: out
+          compression-level: 1
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload portable Python 3.11
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-python311-portable
+          path: python311
           compression-level: 1
           retention-days: 30
           if-no-files-found: error
