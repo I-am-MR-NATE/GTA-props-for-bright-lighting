@@ -1,0 +1,147 @@
+name: FLP4 Native FL Install Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-native-fl-install-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download and verify exact FL Studio installer
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $ProgressPreference='SilentlyContinue'
+          New-Item -ItemType Directory -Force -Path _fl | Out-Null
+          $installer=(Resolve-Path _fl).Path + '\flstudio_win64_26.1.4.5589.exe'
+          $url='https://support.image-line.com/redirect/flstudio_win_installer'
+          $client=New-Object System.Net.WebClient
+          $client.Headers.Add('User-Agent','MEGA-DAN-FLP-Builder/1.0')
+          $client.DownloadFile($url,$installer)
+          $bytes=(Get-Item $installer).Length
+          if ($bytes -ne 1107195744) { throw "installer size mismatch $bytes" }
+          $sha=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($sha -ne '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3') { throw "installer SHA mismatch $sha" }
+          "bytes=$bytes`nsha256=$sha`nsource=$url" | Set-Content -Encoding ascii _fl\INSTALLER_RECEIPT.txt
+
+      - name: Install FL Studio silently on native Windows
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $installer=(Resolve-Path _fl\flstudio_win64_26.1.4.5589.exe).Path
+          $p=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          "exit_code=$($p.ExitCode)" | Set-Content -Encoding ascii _fl\INSTALL_EXIT.txt
+          if ($p.ExitCode -ne 0) { throw "FL installer exit $($p.ExitCode)" }
+          Start-Sleep -Seconds 5
+          $hits=@(Get-ChildItem 'C:\Program Files\Image-Line','C:\Program Files (x86)\Image-Line' -Filter FL64.exe -Recurse -File -ErrorAction SilentlyContinue)
+          if ($hits.Count -lt 1) { throw 'FL64.exe not found after silent install' }
+          $fl64=$hits | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $root=$fl64.DirectoryName
+          "root=$root`nfl64=$($fl64.FullName)`nfl64_bytes=$($fl64.Length)`nfl64_sha256=$((Get-FileHash -Algorithm SHA256 $fl64.FullName).Hash.ToLowerInvariant())" | Set-Content -Encoding ascii _fl\INSTALLED_IDENTITY.txt
+          $root | Set-Content -Encoding ascii _fl\INSTALL_ROOT.txt
+          Get-ChildItem -Recurse -File $root | Sort-Object FullName | ForEach-Object {
+            $h=(Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$h  $($_.FullName.Substring($root.Length + 1).Replace('\','/'))"
+          } | Set-Content -Encoding ascii _fl\TREE_SHA256SUMS.txt
+          (Get-ChildItem -Recurse -File $root | Measure-Object -Property Length -Sum) | Format-List * | Out-String | Set-Content _fl\TREE_SIZE.txt
+
+      - name: Capture Image-Line registry and package installed tree
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          reg export 'HKCU\Software\Image-Line' _fl\HKCU_IMAGE_LINE.reg /y 2>&1 | Out-File _fl\REG_EXPORT.log -Append
+          reg export 'HKLM\SOFTWARE\Image-Line' _fl\HKLM_IMAGE_LINE.reg /y 2>&1 | Out-File _fl\REG_EXPORT.log -Append
+          reg export 'HKLM\SOFTWARE\WOW6432Node\Image-Line' _fl\HKLM_WOW6432_IMAGE_LINE.reg /y 2>&1 | Out-File _fl\REG_EXPORT.log -Append
+          $root=(Get-Content _fl\INSTALL_ROOT.txt -Raw).Trim()
+          $parent=Split-Path $root -Parent
+          $name=Split-Path $root -Leaf
+          tar.exe -cf _fl\flstudio-installed.tar -C $parent $name
+          if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
+          $tar=(Resolve-Path _fl\flstudio-installed.tar).Path
+          $chunk=240MB
+          $input=[IO.File]::OpenRead($tar)
+          try {
+            $buf=New-Object byte[] $chunk
+            $index=0
+            while (($read=$input.Read($buf,0,$buf.Length)) -gt 0) {
+              $path=('_fl\flstudio-installed.part.{0:D2}.bin' -f $index)
+              $out=[IO.File]::Create($path)
+              try { $out.Write($buf,0,$read) } finally { $out.Dispose() }
+              $index++
+            }
+          } finally { $input.Dispose() }
+          Get-ChildItem _fl\flstudio-installed.part.*.bin | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant())  $($_.Name)  $($_.Length)"
+          } | Set-Content -Encoding ascii _fl\PART_SHA256SUMS.txt
+          $tarsha=(Get-FileHash -Algorithm SHA256 $tar).Hash.ToLowerInvariant()
+          "tar_bytes=$((Get-Item $tar).Length)`ntar_sha256=$tarsha`npart_count=$((Get-ChildItem _fl\flstudio-installed.part.*.bin).Count)" | Set-Content -Encoding ascii _fl\PACKAGE_RECEIPT.txt
+          Remove-Item $tar -Force
+
+      - name: Upload install metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp4-fl-installed-meta
+          path: |
+            _fl/*.txt
+            _fl/*.reg
+            _fl/*.log
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-00, path: _fl/flstudio-installed.part.00.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-01, path: _fl/flstudio-installed.part.01.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-02, path: _fl/flstudio-installed.part.02.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-03, path: _fl/flstudio-installed.part.03.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 04
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-04, path: _fl/flstudio-installed.part.04.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 05
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-05, path: _fl/flstudio-installed.part.05.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 06
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-06, path: _fl/flstudio-installed.part.06.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 07
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-07, path: _fl/flstudio-installed.part.07.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 08
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-08, path: _fl/flstudio-installed.part.08.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 09
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-09, path: _fl/flstudio-installed.part.09.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 10
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-10, path: _fl/flstudio-installed.part.10.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 11
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-11, path: _fl/flstudio-installed.part.11.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 12
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-12, path: _fl/flstudio-installed.part.12.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 13
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-13, path: _fl/flstudio-installed.part.13.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 14
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-14, path: _fl/flstudio-installed.part.14.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - name: Upload part 15
+        uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-installed-part-15, path: _fl/flstudio-installed.part.15.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
