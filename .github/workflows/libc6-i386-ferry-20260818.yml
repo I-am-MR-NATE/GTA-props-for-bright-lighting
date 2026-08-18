@@ -1,0 +1,37 @@
+name: libc6-i386 Runtime Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/libc6-i386-ferry-20260818.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch exact Debian stable 32-bit compatibility runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _ferry
+          url='https://deb.debian.org/debian/pool/main/g/glibc/libc6-i386_2.41-12+deb13u3_amd64.deb'
+          curl --fail --location --retry 5 --retry-all-errors "$url" -o _ferry/libc6-i386_2.41-12+deb13u3_amd64.deb
+          test "$(stat -c %s _ferry/libc6-i386_2.41-12+deb13u3_amd64.deb)" -eq 2544284
+          echo 'f64b92d5e5a50a03052a880d948d39492569509b4f60b53f0f9be34018cf68e2  _ferry/libc6-i386_2.41-12+deb13u3_amd64.deb' | sha256sum -c -
+          dpkg-deb -I _ferry/libc6-i386_2.41-12+deb13u3_amd64.deb > _ferry/CONTROL.txt
+          sha256sum _ferry/libc6-i386_2.41-12+deb13u3_amd64.deb > _ferry/SHA256SUMS.txt
+          printf 'source=%s\nsha256=%s\nbytes=%s\nrun_id=%s\nhead=%s\n' "$url" 'f64b92d5e5a50a03052a880d948d39492569509b4f60b53f0f9be34018cf68e2' '2544284' "$GITHUB_RUN_ID" "$GITHUB_SHA" > _ferry/RECEIPT.txt
+
+      - name: Upload runtime package
+        uses: actions/upload-artifact@v4
+        with:
+          name: libc6-i386-debian13-amd64
+          path: _ferry
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
