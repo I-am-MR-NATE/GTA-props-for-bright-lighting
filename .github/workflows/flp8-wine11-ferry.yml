@@ -15,28 +15,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Download and verify exact Wine 11.0 WoW64 runtime
+      - name: Download and verify Wine 11.0 Staging WoW64 runtime
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p _wine
-          url='https://github.com/Kron4ek/Wine-Builds/releases/download/11.0/wine-11.0-amd64-wow64.tar.xz'
-          expected='39574efa1132c3ca0d5c77dd2eddbe4a49cca0d6cc2c290ff4924493a1c40314'
+          file='wine-11.0-staging-amd64-wow64.tar.xz'
+          url="https://github.com/Kron4ek/Wine-Builds/releases/download/11.0/${file}"
+          expected='e6538a417dd2e7f738ad77addf74bfd9e45c9d970653674f93bde2df29055f2f'
           curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 1800 \
-            --user-agent 'MEGA-DAN-FLP8/1.0' "$url" -o _wine/wine-11.0-amd64-wow64.tar.xz
-          actual="$(sha256sum _wine/wine-11.0-amd64-wow64.tar.xz | awk '{print $1}')"
+            --user-agent 'MEGA-DAN-FLP8/1.0' "$url" -o "_wine/${file}"
+          actual="$(sha256sum "_wine/${file}" | awk '{print $1}')"
           test "$actual" = "$expected"
-          bytes="$(stat -c %s _wine/wine-11.0-amd64-wow64.tar.xz)"
-          file _wine/wine-11.0-amd64-wow64.tar.xz | tee _wine/FILE_IDENTITY.txt
-          tar -tJf _wine/wine-11.0-amd64-wow64.tar.xz | sed -n '1,25p' > _wine/ARCHIVE_HEAD.txt
-          printf '%s  %s\n' "$actual" 'wine-11.0-amd64-wow64.tar.xz' > _wine/SHA256SUMS.txt
+          bytes="$(stat -c %s "_wine/${file}")"
+          file "_wine/${file}" | tee _wine/FILE_IDENTITY.txt
+          tar -tJf "_wine/${file}" | sed -n '1,25p' > _wine/ARCHIVE_HEAD.txt
+          printf '%s  %s\n' "$actual" "$file" > _wine/SHA256SUMS.txt
           printf 'source=%s\nexpected_sha256=%s\nobserved_sha256=%s\nbytes=%s\nrun_id=%s\nrun_attempt=%s\nhead=%s\n' \
             "$url" "$expected" "$actual" "$bytes" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" > _wine/RECEIPT.txt
 
-      - name: Upload exact Wine runtime artifact
+      - name: Upload Wine 11.0 Staging runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flp8-wine-11.0-amd64-wow64
+          name: flp8-wine-11.0-staging-amd64-wow64
           path: _wine
           compression-level: 0
           retention-days: 1
