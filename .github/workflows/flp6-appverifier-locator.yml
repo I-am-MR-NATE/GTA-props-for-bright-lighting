@@ -1,0 +1,50 @@
+name: FLP6 Application Verifier Locator
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp6-appverifier-locator.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  locate:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Locate existing or separately packaged Application Verifier
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_appverif'; New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Get-Command appverif.exe -All -ErrorAction SilentlyContinue | Format-List * | Out-String | Set-Content (Join-Path $root 'GET_COMMAND.txt')
+          $known=@(
+            'C:\Windows\System32\appverif.exe',
+            'C:\Windows\SysWOW64\appverif.exe',
+            'C:\Program Files\Application Verifier\appverif.exe',
+            'C:\Program Files (x86)\Application Verifier\appverif.exe',
+            'C:\Program Files (x86)\Windows Kits\10\App Certification Kit\appverif.exe'
+          )
+          $hits=@(); foreach($p in $known){if(Test-Path $p){$hits += Get-Item $p}}
+          $roots=@('C:\Program Files\Windows Kits','C:\Program Files (x86)\Windows Kits','C:\Program Files\Application Verifier','C:\Program Files (x86)\Application Verifier')
+          foreach($r in $roots){if(Test-Path $r){$hits += Get-ChildItem $r -Filter appverif.exe -File -Recurse -ErrorAction SilentlyContinue}}
+          $hits=$hits | Sort-Object FullName -Unique
+          $hits | ForEach-Object {[pscustomobject]@{Path=$_.FullName;Bytes=$_.Length;FileVersion=$_.VersionInfo.FileVersion;ProductVersion=$_.VersionInfo.ProductVersion;SHA256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()}} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $root 'EXISTING_HITS.json')
+          winget search --query 'Application Verifier' --accept-source-agreements | Out-String | Set-Content (Join-Path $root 'WINGET_SEARCH_APPVERIFIER.txt')
+          winget search --query 'AppVerifier' --accept-source-agreements | Out-String | Set-Content (Join-Path $root 'WINGET_SEARCH_APPVERIFIER_SHORT.txt')
+          if(Get-Command choco -ErrorAction SilentlyContinue){choco search applicationverifier --exact --limit-output | Out-String | Set-Content (Join-Path $root 'CHOCO_SEARCH.txt')}
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Application Verifier|Windows Software Development Kit'} | Select-Object DisplayName,DisplayVersion,InstallLocation,UninstallString | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $root 'UNINSTALL_REGISTRY.json')
+          $g=Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10' -Filter gflags.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+          if($g){New-Item -ItemType Directory -Force -Path (Join-Path $root 'runtime')|Out-Null; Copy-Item $g.FullName (Join-Path $root 'runtime\gflags.exe'); [pscustomobject]@{Path=$g.FullName;FileVersion=$g.VersionInfo.FileVersion;SHA256=(Get-FileHash $g.FullName -Algorithm SHA256).Hash.ToLower()}|ConvertTo-Json|Set-Content (Join-Path $root 'GFLAGS.json')}
+          if($hits.Count -gt 0){New-Item -ItemType Directory -Force -Path (Join-Path $root 'runtime')|Out-Null; Copy-Item $hits[0].FullName (Join-Path $root 'runtime\appverif.exe')}
+          "hit_count=$($hits.Count)`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'RECEIPT.txt')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-appverifier-locator
+          path: _appverif
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
