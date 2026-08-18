@@ -1,0 +1,42 @@
+name: FLP4 nsis-rs Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-nsis-rs-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build exact nsis-rs extractor
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone https://github.com/ATRAPSLLC/nsis-rs.git _nsis
+          cd _nsis
+          git checkout --detach 361796dd57891c9d796772a8103f7f6dbc8a1d0a
+          test "$(git rev-parse HEAD)" = '361796dd57891c9d796772a8103f7f6dbc8a1d0a'
+          cargo test --locked 2>&1 | tee ../TEST_LOG.txt
+          cargo build --locked --release --example dump
+          mkdir -p ../artifact
+          cp target/release/examples/dump ../artifact/nsis-rs-dump
+          chmod +x ../artifact/nsis-rs-dump
+          ../artifact/nsis-rs-dump --help > ../artifact/HELP.txt 2>&1 || true
+          sha256sum ../artifact/nsis-rs-dump > ../artifact/SHA256SUMS.txt
+          git archive --format=tar.gz --output=../artifact/nsis-rs-361796dd.tar.gz HEAD
+          printf 'upstream=ATRAPSLLC/nsis-rs\ncommit=361796dd57891c9d796772a8103f7f6dbc8a1d0a\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > ../artifact/RECEIPT.txt
+          cp ../TEST_LOG.txt ../artifact/TEST_LOG.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-nsis-rs-361796dd
+          path: artifact
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
