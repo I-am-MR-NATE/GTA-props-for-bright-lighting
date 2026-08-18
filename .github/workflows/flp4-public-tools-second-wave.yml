@@ -1,0 +1,108 @@
+name: FLP4 Public Tool Vault Second Wave
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-public-tools-second-wave.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  undelphi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build and test exact Undelphi 0.3.2 commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone https://github.com/ATRAPSLLC/undelphi.git _undelphi/src
+          cd _undelphi/src
+          git checkout --detach dc12c62ec32f42b4ae5e9dfe2bb678a762490d53
+          test "$(git rev-parse HEAD)" = 'dc12c62ec32f42b4ae5e9dfe2bb678a762490d53'
+          cargo test --release 2>&1 | tee ../TEST_LOG.txt
+          cargo build --release --example dump 2>&1 | tee ../BUILD_LOG.txt
+          test -x target/release/examples/dump
+          target/release/examples/dump 2>&1 | head -40 > ../DUMP_USAGE.txt || true
+          sha256sum target/release/examples/dump > ../BINARY_SHA256SUMS.txt
+          git archive --format=tar.gz --output=../undelphi-dc12c62ec32f42b4ae5e9dfe2bb678a762490d53.tar.gz HEAD
+          sha256sum ../undelphi-dc12c62ec32f42b4ae5e9dfe2bb678a762490d53.tar.gz > ../SOURCE_SHA256SUMS.txt
+          printf 'upstream=ATRAPSLLC/undelphi\ncommit=dc12c62ec32f42b4ae5e9dfe2bb678a762490d53\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > ../RECEIPT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-undelphi-0.3.2
+          path: |
+            _undelphi/src/target/release/examples/dump
+            _undelphi/undelphi-dc12c62ec32f42b4ae5e9dfe2bb678a762490d53.tar.gz
+            _undelphi/TEST_LOG.txt
+            _undelphi/BUILD_LOG.txt
+            _undelphi/DUMP_USAGE.txt
+            _undelphi/BINARY_SHA256SUMS.txt
+            _undelphi/SOURCE_SHA256SUMS.txt
+            _undelphi/RECEIPT.txt
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+  kaitai:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Acquire exact Kaitai Struct Compiler 0.11 portable ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _kaitai/unpacked
+          url='https://github.com/kaitai-io/kaitai_struct_compiler/releases/download/0.11/kaitai-struct-compiler-0.11.zip'
+          expected='ff89389d9dc9e770d78a24af328763cb1f8e7b31ce7766c9edf10669a060f2a2'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 900 "$url" -o _kaitai/kaitai-struct-compiler-0.11.zip
+          actual="$(sha256sum _kaitai/kaitai-struct-compiler-0.11.zip | awk '{print $1}')"
+          test "$actual" = "$expected"
+          unzip -oq _kaitai/kaitai-struct-compiler-0.11.zip -d _kaitai/unpacked
+          compiler="$(find _kaitai/unpacked -type f -name 'kaitai-struct-compiler' -print -quit)"
+          test -n "$compiler"
+          chmod +x "$compiler"
+          "$compiler" --version 2>&1 | tee _kaitai/VERSION.txt
+          sha256sum _kaitai/kaitai-struct-compiler-0.11.zip > _kaitai/SHA256SUMS.txt
+          printf 'source=%s\nsha256=%s\nrun_id=%s\nhead=%s\n' "$url" "$actual" "$GITHUB_RUN_ID" "$GITHUB_SHA" > _kaitai/RECEIPT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-kaitai-compiler-0.11
+          path: _kaitai
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+  frida:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Acquire and import exact Frida Python runtime 17.17.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _frida/wheels _frida/venv
+          python3 -m pip download --dest _frida/wheels 'frida==17.17.0'
+          python3 -m venv _frida/venv
+          _frida/venv/bin/python -m pip install --no-index --find-links _frida/wheels 'frida==17.17.0'
+          _frida/venv/bin/python -c 'import frida; print(frida.__version__)' | tee _frida/VERSION.txt
+          sha256sum _frida/wheels/* > _frida/SHA256SUMS.txt
+          printf 'upstream=frida/frida\nversion=17.17.0\ncommit=03f16b3b11c5bb945cdb7f6158a84dd57655de4c\nrun_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > _frida/RECEIPT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-frida-python-17.17.0
+          path: |
+            _frida/wheels
+            _frida/VERSION.txt
+            _frida/SHA256SUMS.txt
+            _frida/RECEIPT.txt
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
