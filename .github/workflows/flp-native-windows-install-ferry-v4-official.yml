@@ -1,0 +1,75 @@
+name: FLP Native Windows Install Ferry V4 OFFICIAL FLAGS
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-native-windows-install-ferry-v4-official.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  official-silent-install-proof:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Download and verify exact FL Studio installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work='C:\flp-native-v4'
+          New-Item -ItemType Directory -Force -Path $work,"$work\proof" | Out-Null
+          $installer="$work\flstudio-latest.exe"
+          $url='https://support.image-line.com/redirect/flstudio_win_installer'
+          & curl.exe -fL --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 -A 'MEGA-DAN-FLP-Builder/1.0' $url -o $installer
+          if ($LASTEXITCODE -ne 0) { throw "curl failed $LASTEXITCODE" }
+          $bytes=(Get-Item $installer).Length
+          $sha=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($bytes -ne 1107195744) { throw "unexpected installer bytes $bytes" }
+          if ($sha -ne '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3') { throw "installer SHA mismatch $sha" }
+          "installer_bytes=$bytes`ninstaller_sha256=$sha`nsource=$url" | Set-Content "$work\proof\INSTALLER.txt"
+
+      - name: Install using Image-Line documented silent flags
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work='C:\flp-native-v4'
+          $installer="$work\flstudio-latest.exe"
+          $started=Get-Date
+          $proc=Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
+          $elapsed=((Get-Date)-$started).TotalSeconds
+          "exit_code=$($proc.ExitCode)`nelapsed_seconds=$elapsed`narguments=/S /ALLUSERS=1" | Set-Content "$work\proof\INSTALL_EXIT.txt"
+          if ($proc.ExitCode -ne 0) { throw "installer exit $($proc.ExitCode)" }
+          $fl=Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Filter FL64.exe -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $fl) { throw 'FL64.exe not found after documented silent install' }
+          $root=$fl.FullName
+          while ((Split-Path $root -Leaf) -notmatch '^Image-Line$' -and (Split-Path $root -Parent)) { $root=Split-Path $root -Parent }
+          if ((Split-Path $root -Leaf) -notmatch '^Image-Line$') { $root=Split-Path $fl.FullName -Parent }
+          $flSha=(Get-FileHash $fl.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $vi=(Get-Item $fl.FullName).VersionInfo
+          $engine=Get-ChildItem $root -Filter FLEngine_x64.dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $engineSha=if($engine){(Get-FileHash $engine.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}else{''}
+          @(
+            "image_line_root=$root",
+            "fl64_path=$($fl.FullName)",
+            "fl64_bytes=$($fl.Length)",
+            "fl64_sha256=$flSha",
+            "file_version=$($vi.FileVersion)",
+            "product_version=$($vi.ProductVersion)",
+            "engine_path=$($engine.FullName)",
+            "engine_sha256=$engineSha",
+            "run_id=$env:GITHUB_RUN_ID",
+            "head=$env:GITHUB_SHA"
+          ) | Set-Content "$work\proof\FL64_IDENTITY.txt"
+          Copy-Item $fl.FullName "$work\proof\FL64.exe"
+          if($engine){ Copy-Item $engine.FullName "$work\proof\FLEngine_x64.dll" }
+
+      - name: Upload native install proof and key x64 binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-native-v4-official-install-proof
+          path: C:\flp-native-v4\proof
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
