@@ -1,1 +1,1 @@
-worker08 native FL host-save persistence trigger 2026-08-18
+worker08 native FL host-save persistence trigger v2 2026-08-18
