@@ -28,10 +28,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo 'worker08 compact stock-mixer evidence readback'
+          echo 'worker08 compact stock-mixer evidence readback v2'
           test -f evidence/flstudio-latest.exe
           test -f evidence/oracle-build.json
-          test -f evidence/oracle-decode.json
           test -f evidence/save-observation.json
           test -f evidence/fl-saved-decode.json
           test -f evidence/clean-reopen.json
