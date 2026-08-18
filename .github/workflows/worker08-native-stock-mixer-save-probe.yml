@@ -1,7 +1,7 @@
 name: Worker08 Native Stock Mixer Save Probe
 
 on:
-  push:
+  pull_request:
     branches: [master]
     paths:
       - '.github/workflows/worker08-native-stock-mixer-save-probe.yml'
@@ -154,7 +154,7 @@ jobs:
           def events(data):
               h=struct.unpack_from('<I',data,4)[0];dt=8+h;dl=struct.unpack_from('<I',data,dt+4)[0];p=data[dt+8:dt+8+dl];out=[];pos=0;i=0
               while pos<len(p):
-                  eid=p[pos];start=pos;pos+=1
+                  eid=p[pos];pos+=1
                   if eid<64:n=1
                   elif eid<128:n=2
                   elif eid<192:n=4
@@ -216,8 +216,7 @@ jobs:
         run: |
           $ErrorActionPreference='Continue'
           $out="$env:RUNNER_TEMP\worker08";$env:W08_DECODE_TARGET=$env:CANDIDATE_PATH
-          Copy-Item "$out\decode.py" "$out\decode_saved.py"
-          python "$out\decode_saved.py"
+          python "$out\decode.py"
           if (Test-Path "$out\oracle-decode.json") { Move-Item "$out\oracle-decode.json" "$out\fl-saved-decode.json" -Force }
           Add-Type -AssemblyName System.Windows.Forms;Add-Type -AssemblyName System.Drawing
           $fl=$env:FL64_PATH;$candidate=$env:CANDIDATE_PATH
