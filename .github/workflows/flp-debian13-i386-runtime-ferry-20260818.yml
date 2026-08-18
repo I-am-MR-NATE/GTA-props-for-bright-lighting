@@ -1,0 +1,48 @@
+name: FLP Debian 13 i386 Runtime Ferry 20260818
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.flp-debian13-i386-runtime-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Build minimal Debian 13 i386 runtime root
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$RUNNER_TEMP/flp-i386-runtime"
+          mkdir -p "$work/debs" "$work/root" "$work/meta"
+          docker run --rm -v "$work/debs:/out" debian:13-slim bash -lc '
+            set -Eeuo pipefail
+            dpkg --add-architecture i386
+            apt-get update >/dev/null
+            apt-get install -y --download-only --no-install-recommends libgcc-s1:i386 libfreetype6:i386 >/dev/null
+            cp /var/cache/apt/archives/*.deb /out/
+          '
+          for deb in "$work"/debs/*.deb; do dpkg-deb -x "$deb" "$work/root"; done
+          find "$work/debs" -maxdepth 1 -type f -printf '%f %s\n' | sort > "$work/meta/PACKAGES.txt"
+          sha256sum "$work"/debs/*.deb | sed "s#  $work/debs/#  #" | sort -k2 > "$work/meta/PACKAGE_SHA256SUMS.txt"
+          test -e "$work/root/usr/lib/i386-linux-gnu/libgcc_s.so.1"
+          test -e "$work/root/usr/lib/i386-linux-gnu/libfreetype.so.6"
+          tar -C "$work/root" -cJf "$work/debian13-i386-runtime-root.tar.xz" .
+          bytes="$(stat -c %s "$work/debian13-i386-runtime-root.tar.xz")"
+          sha="$(sha256sum "$work/debian13-i386-runtime-root.tar.xz" | awk '{print $1}')"
+          printf 'bytes=%s\nsha256=%s\nrun_id=%s\nhead=%s\n' "$bytes" "$sha" "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$work/meta/RECEIPT.txt"
+      - name: Upload runtime root
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-debian13-i386-runtime-root
+          path: |
+            ${{ runner.temp }}/flp-i386-runtime/debian13-i386-runtime-root.tar.xz
+            ${{ runner.temp }}/flp-i386-runtime/meta
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
