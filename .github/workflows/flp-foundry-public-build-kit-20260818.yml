@@ -12,14 +12,15 @@ permissions:
 jobs:
   ferry:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Assemble exact public cross-build kit
         shell: bash
         run: |
           set -Eeuo pipefail
           root="$RUNNER_TEMP/foundry-build-kit"
-          mkdir -p "$root/src" "$root/rust-targets" "$root/toolchain" "$root/meta"
+          pack="$RUNNER_TEMP/foundry-build-pack"
+          mkdir -p "$root/src" "$root/rust-targets" "$root/toolchain" "$root/meta" "$pack"
           rustc --version --verbose | tee "$root/meta/RUSTC.txt"
           cargo --version --verbose | tee "$root/meta/CARGO.txt"
           rustup target add x86_64-pc-windows-gnullvm i686-pc-windows-gnullvm
@@ -44,12 +45,55 @@ jobs:
           printf '%s\n' "$url" > "$root/meta/LLVM_MINGW_URL.txt"
 
           find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/meta/SHA256SUMS.txt"
+          tar -C "$root" --zstd -cf "$pack/foundry-build-kit.tar.zst" .
+          sha256sum "$pack/foundry-build-kit.tar.zst" > "$pack/WHOLE_SHA256.txt"
+          stat -c '%s foundry-build-kit.tar.zst' "$pack/foundry-build-kit.tar.zst" > "$pack/WHOLE_BYTES.txt"
+          split -b 240M -d -a 2 --additional-suffix=.bin "$pack/foundry-build-kit.tar.zst" "$pack/foundry-build-kit.part."
+          sha256sum "$pack"/foundry-build-kit.part.* > "$pack/PART_SHA256SUMS.txt"
+          find "$pack" -name 'foundry-build-kit.part.*' -printf '%f %s\n' | sort > "$pack/PART_BYTES.txt"
+          rm "$pack/foundry-build-kit.tar.zst"
 
-      - name: Upload public Foundry build kit
+      - name: Upload metadata
         uses: actions/upload-artifact@v4
         with:
-          name: flp-foundry-public-build-kit
-          path: ${{ runner.temp }}/foundry-build-kit
-          compression-level: 3
+          name: flp-foundry-public-build-kit-meta
+          path: |
+            ${{ runner.temp }}/foundry-build-pack/WHOLE_SHA256.txt
+            ${{ runner.temp }}/foundry-build-pack/WHOLE_BYTES.txt
+            ${{ runner.temp }}/foundry-build-pack/PART_SHA256SUMS.txt
+            ${{ runner.temp }}/foundry-build-pack/PART_BYTES.txt
+          compression-level: 1
           retention-days: 1
           if-no-files-found: error
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-public-build-kit-part-00
+          path: ${{ runner.temp }}/foundry-build-pack/foundry-build-kit.part.00.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-public-build-kit-part-01
+          path: ${{ runner.temp }}/foundry-build-pack/foundry-build-kit.part.01.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-public-build-kit-part-02
+          path: ${{ runner.temp }}/foundry-build-pack/foundry-build-kit.part.02.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-public-build-kit-part-03
+          path: ${{ runner.temp }}/foundry-build-pack/foundry-build-kit.part.03.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: ignore
