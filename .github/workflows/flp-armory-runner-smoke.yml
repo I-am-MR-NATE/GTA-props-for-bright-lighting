@@ -1,6 +1,11 @@
 name: FLP Armory Runner Smoke
 
 on:
+  push:
+    branches:
+      - 'mega-dan/flp-armory-runner-smoke-20260818'
+    paths:
+      - '.github/workflows/flp-armory-runner-smoke.yml'
   pull_request:
     branches: [master]
     paths:
