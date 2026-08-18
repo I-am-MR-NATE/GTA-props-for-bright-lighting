@@ -1,7 +1,12 @@
+# trigger: 2026-08-18 native-install-v2-pr
 name: FLP Native Windows Install Ferry V2
 
 on:
   push:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-native-windows-install-ferry-v2.yml'
+  pull_request:
     branches: [master]
     paths:
       - '.github/workflows/flp-native-windows-install-ferry-v2.yml'
