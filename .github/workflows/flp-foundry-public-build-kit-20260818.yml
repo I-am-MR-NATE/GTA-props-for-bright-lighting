@@ -45,11 +45,70 @@ jobs:
 
           find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/meta/SHA256SUMS.txt"
 
-      - name: Upload public Foundry build kit
-        uses: actions/upload-artifact@v4
+      - name: Pack and split kit into four fixed parts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/foundry-ferry"
+          root="$RUNNER_TEMP/foundry-build-kit"
+          mkdir -p "$stage/parts" "$stage/meta"
+          tar -C "$root" -cf "$stage/foundry-build-kit.tar" .
+          sha256sum "$stage/foundry-build-kit.tar" > "$stage/meta/PACK_SHA256.txt"
+          wc -c < "$stage/foundry-build-kit.tar" | tr -d ' ' > "$stage/meta/PACK_BYTES.txt"
+          python3 - "$stage/foundry-build-kit.tar" "$stage/parts" <<'PY'
+          from pathlib import Path
+          import math, sys
+          src=Path(sys.argv[1]); out=Path(sys.argv[2]); data_size=src.stat().st_size
+          count=4; piece=math.ceil(data_size/count)
+          with src.open('rb') as f:
+              for i in range(count):
+                  p=out/f'foundry-build-kit.part.{i:02d}.bin'
+                  remaining=min(piece, data_size-i*piece)
+                  with p.open('wb') as w:
+                      while remaining>0:
+                          b=f.read(min(8*1024*1024,remaining))
+                          if not b: break
+                          w.write(b); remaining-=len(b)
+                  if p.stat().st_size == 0:
+                      raise SystemExit(f'empty fixed part {i}')
+          PY
+          find "$stage/parts" -type f -print0 | sort -z | xargs -0 sha256sum > "$stage/meta/PART_SHA256SUMS.txt"
+          find "$stage/parts" -type f -printf '%f\n' | sort > "$stage/meta/PART_ORDER.txt"
+          find "$stage/parts" -type f -printf '%f %s\n' | sort > "$stage/meta/PART_BYTES.txt"
+          rm "$stage/foundry-build-kit.tar"
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: flp-foundry-public-build-kit
-          path: ${{ runner.temp }}/foundry-build-kit
-          compression-level: 3
+          name: flp-foundry-build-kit-meta
+          path: ${{ runner.temp }}/foundry-ferry/meta
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-build-kit-part-00
+          path: ${{ runner.temp }}/foundry-ferry/parts/foundry-build-kit.part.00.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-build-kit-part-01
+          path: ${{ runner.temp }}/foundry-ferry/parts/foundry-build-kit.part.01.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-build-kit-part-02
+          path: ${{ runner.temp }}/foundry-ferry/parts/foundry-build-kit.part.02.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp-foundry-build-kit-part-03
+          path: ${{ runner.temp }}/foundry-ferry/parts/foundry-build-kit.part.03.bin
+          compression-level: 0
           retention-days: 1
           if-no-files-found: error
