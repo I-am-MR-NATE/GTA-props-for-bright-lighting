@@ -28,12 +28,12 @@ jobs:
         with:
           bun-version: '1.3.2'
 
-      - name: Build exact parser bundle and public fixture
+      - name: Build exact parser bundle and public fixtures
         shell: bash
         run: |
           set -Eeuo pipefail
           rm -rf out _src python310
-          mkdir -p out/pyflp_site out/flpdiff out/ts-flp out/fixtures _src python310
+          mkdir -p out/pyflp_site out/flpdiff out/ts-flp out/fixtures/pyflp out/fixtures/flpdiff _src python310
 
           python -m pip install --disable-pip-version-check --no-compile --target out/pyflp_site 'pyflp==2.2.1'
           PYTHONPATH="$PWD/out/pyflp_site" python - <<'PY'
@@ -58,6 +58,12 @@ jobs:
           chmod +x out/flpdiff/flpdiff-linux-x64
           out/flpdiff/flpdiff-linux-x64 --version > out/flpdiff/VERSION.txt
           printf '%s\n' 'df4faf3297ab49d674cc53502a9691b8c2d68dad' > out/flpdiff/COMMIT.txt
+          cp _src/flpdiff/tests/corpus/re_base/fl25/*.flp out/fixtures/flpdiff/
+          cp _src/flpdiff/tests/corpus/re_base/scratch/_serum_mastervol_03.flp out/fixtures/flpdiff/
+          cp _src/flpdiff/tests/corpus/re_base/scratch/_serum_mastervol_03b.flp out/fixtures/flpdiff/
+          cp _src/flpdiff/tests/corpus/re_base/scratch/_serum_mastervol_07.flp out/fixtures/flpdiff/
+          cp _src/flpdiff/tests/corpus/re_base/scratch/_sweep_tempo_120.flp out/fixtures/flpdiff/
+          cp _src/flpdiff/tests/corpus/re_base/scratch/_sweep_tempo_145.flp out/fixtures/flpdiff/
 
           git clone --filter=blob:none https://github.com/SpendLessDaw/ts-flp.git _src/ts-flp
           git -C _src/ts-flp checkout --detach 0fe4ef5db4fc4b62733a061109247907a8c68795
@@ -72,10 +78,10 @@ jobs:
           printf '%s\n' '0fe4ef5db4fc4b62733a061109247907a8c68795' > out/ts-flp/COMMIT.txt
 
           PYFLP_FIXTURE_COMMIT='f937126b888ce94271bfea631b89166c74056530'
-          curl --fail --location --retry 3 "https://raw.githubusercontent.com/demberto/PyFLP/${PYFLP_FIXTURE_COMMIT}/tests/assets/FL%2020.8.4.flp" -o 'out/fixtures/FL 20.8.4.flp'
-          curl --fail --location --retry 3 "https://raw.githubusercontent.com/demberto/PyFLP/${PYFLP_FIXTURE_COMMIT}/tests/assets/patterns/multi-channel.flp" -o 'out/fixtures/multi-channel.flp'
-          printf '%s\n' "$PYFLP_FIXTURE_COMMIT" > out/fixtures/PYFLP_FIXTURE_COMMIT.txt
-          sha256sum out/fixtures/*.flp > out/fixtures/SHA256SUMS.txt
+          curl --fail --location --retry 3 "https://raw.githubusercontent.com/demberto/PyFLP/${PYFLP_FIXTURE_COMMIT}/tests/assets/FL%2020.8.4.flp" -o 'out/fixtures/pyflp/FL 20.8.4.flp'
+          curl --fail --location --retry 3 "https://raw.githubusercontent.com/demberto/PyFLP/${PYFLP_FIXTURE_COMMIT}/tests/assets/patterns/multi-channel.flp" -o 'out/fixtures/pyflp/multi-channel.flp'
+          printf '%s\n' "$PYFLP_FIXTURE_COMMIT" > out/fixtures/pyflp/PYFLP_FIXTURE_COMMIT.txt
+          find out/fixtures -type f -name '*.flp' -print0 | sort -z | xargs -0 sha256sum > out/fixtures/SHA256SUMS.txt
 
           python --version > out/PYTHON_VERSION.txt
           node --version > out/NODE_VERSION.txt
@@ -88,7 +94,7 @@ jobs:
       - name: Upload exact parser runtime
         uses: actions/upload-artifact@v4
         with:
-          name: flp-parser-runtime-exact-v4-with-public-fixture
+          name: flp-parser-runtime-exact-v5-with-public-corpus
           path: out
           include-hidden-files: true
           compression-level: 1
