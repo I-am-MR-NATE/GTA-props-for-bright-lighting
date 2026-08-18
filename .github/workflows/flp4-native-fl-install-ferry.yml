@@ -36,8 +36,10 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
+          whoami /all | Out-File -Encoding ascii _fl\WHOAMI.txt
+          cmd /c "net session > _fl\NET_SESSION.txt 2>&1"
           $installer=(Resolve-Path _fl\flstudio_win64_26.1.4.5589.exe).Path
-          $p=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          $p=Start-Process -FilePath $installer -ArgumentList '/S /ALLUSERS=1' -PassThru -Wait
           "exit_code=$($p.ExitCode)" | Set-Content -Encoding ascii _fl\INSTALL_EXIT.txt
           if ($p.ExitCode -ne 0) { throw "FL installer exit $($p.ExitCode)" }
           Start-Sleep -Seconds 5
