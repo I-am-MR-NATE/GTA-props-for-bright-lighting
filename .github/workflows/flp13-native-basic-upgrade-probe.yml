@@ -18,12 +18,12 @@ jobs:
           $ErrorActionPreference='Stop'
           $ProgressPreference='SilentlyContinue'
           $installer=Join-Path $env:RUNNER_TEMP 'flstudio-latest.exe'
-          # Canonical permanent redirect already standardised by MEGA_DAN_TOOLBELT.
           & curl.exe -L --fail --retry 2 --connect-timeout 30 -o $installer 'https://support.image-line.com/redirect/flstudio_win_installer'
           if($LASTEXITCODE -ne 0){throw "curl failed: $LASTEXITCODE"}
           $installerItem=Get-Item $installer
           if($installerItem.Length -lt 100MB){throw "installer too small"}
-          if(([IO.File]::ReadAllBytes($installer)[0..1] -join ',') -ne '77,90'){throw 'installer missing MZ'}
+          [byte[]]$mz=[IO.File]::ReadAllBytes($installer)[0..1]
+          if(($mz -join ',') -ne '77,90'){throw 'installer missing MZ'}
           $installerHash=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           $ip=Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
           $fl=Get-ChildItem 'C:\Program Files\Image-Line' -Filter FL64.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -39,11 +39,7 @@ jobs:
           $discovery=Join-Path $env:RUNNER_TEMP 'basic-discovery.json'
           $found | ConvertTo-Json -Depth 4 | Set-Content $discovery -Encoding utf8
           $src=$found | Where-Object sha256 -eq $expected | Select-Object -First 1
-          if(-not $src){
-            Write-Host 'Exact stock Basic witness not found. Candidates:'
-            Get-Content $discovery
-            throw 'Exact c8a7... stock Basic.flp not present in this official installation'
-          }
+          if(-not $src){Get-Content $discovery; throw 'Exact c8a7... stock Basic.flp not present in this official installation'}
           $candidate=Join-Path $env:RUNNER_TEMP 'FLP13_Basic_FL24_to_FL26.flp'
           Copy-Item $src.path $candidate -Force
           "FL64_PATH=$($fl.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -62,22 +58,13 @@ jobs:
           $ErrorActionPreference='Stop'
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
-          function Stop-Fl {
-            Get-Process FL64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep 2
-          }
+          function Stop-Fl { Get-Process FL64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
           function Shot([string]$p){
-            $b=[Windows.Forms.SystemInformation]::VirtualScreen
-            $bmp=New-Object Drawing.Bitmap $b.Width,$b.Height
-            $g=[Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size)
-            $bmp.Save($p,[Drawing.Imaging.ImageFormat]::Png)
-            $g.Dispose();$bmp.Dispose()
+            $b=[Windows.Forms.SystemInformation]::VirtualScreen;$bmp=New-Object Drawing.Bitmap $b.Width,$b.Height;$g=[Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size);$bmp.Save($p,[Drawing.Imaging.ImageFormat]::Png);$g.Dispose();$bmp.Dispose()
           }
           function Snapshot-Fl {
-            @((Get-Process FL64 -ErrorAction SilentlyContinue) | ForEach-Object {
-              [pscustomobject]@{id=$_.Id;responding=$_.Responding;title=$_.MainWindowTitle;start=$_.StartTime.ToUniversalTime().ToString('o')}
-            })
+            @((Get-Process FL64 -ErrorAction SilentlyContinue) | ForEach-Object {[pscustomobject]@{id=$_.Id;responding=$_.Responding;title=$_.MainWindowTitle;start=$_.StartTime.ToUniversalTime().ToString('o')}})
           }
           function Activate-Fl {
             $w=New-Object -ComObject WScript.Shell
@@ -86,102 +73,41 @@ jobs:
             return $w
           }
           function Summary([string]$path){
-            [byte[]]$b=[IO.File]::ReadAllBytes($path)
-            if($b.Length -lt 22){throw 'FLP too short'}
-            $magic=[Text.Encoding]::ASCII.GetString($b,0,4)
-            $hlen=[BitConverter]::ToUInt32($b,4)
-            $format=[BitConverter]::ToUInt16($b,8)
-            $channels=[BitConverter]::ToUInt16($b,10)
-            $ppq=[BitConverter]::ToUInt16($b,12)
-            $chunk=[Text.Encoding]::ASCII.GetString($b,14,4)
-            $chunkLen=[BitConverter]::ToUInt32($b,18)
-            $latin=[Text.Encoding]::GetEncoding(28591).GetString($b)
-            $uni=[Text.Encoding]::Unicode.GetString($b)
-            $rx='(?<!\d)(?:\d{1,2}\.){3}\d{3,5}(?!\d)'
+            [byte[]]$b=[IO.File]::ReadAllBytes($path);if($b.Length -lt 22){throw 'FLP too short'}
+            $magic=[Text.Encoding]::ASCII.GetString($b,0,4);$hlen=[BitConverter]::ToUInt32($b,4);$format=[BitConverter]::ToUInt16($b,8)
+            $channels=[BitConverter]::ToUInt16($b,10);$ppq=[BitConverter]::ToUInt16($b,12);$chunk=[Text.Encoding]::ASCII.GetString($b,14,4);$chunkLen=[BitConverter]::ToUInt32($b,18)
+            $latin=[Text.Encoding]::GetEncoding(28591).GetString($b);$uni=[Text.Encoding]::Unicode.GetString($b);$rx='(?<!\d)(?:\d{1,2}\.){3}\d{3,5}(?!\d)'
             $versions=@([regex]::Matches($latin,$rx)|ForEach-Object Value) + @([regex]::Matches($uni,$rx)|ForEach-Object Value)
-            [pscustomobject]@{
-              path=$path;bytes=$b.Length;sha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant();
-              magic=$magic;header_length=$hlen;file_format=$format;channels=$channels;ppq=$ppq;data_chunk=$chunk;data_chunk_length=$chunkLen;
-              version_strings=@($versions|Select-Object -Unique)
-            }
+            [pscustomobject]@{path=$path;bytes=$b.Length;sha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant();magic=$magic;header_length=$hlen;file_format=$format;channels=$channels;ppq=$ppq;data_chunk=$chunk;data_chunk_length=$chunkLen;version_strings=@($versions|Select-Object -Unique)}
           }
           function Diff-Summary([string]$before,[string]$after){
             [byte[]]$a=[IO.File]::ReadAllBytes($before);[byte[]]$b=[IO.File]::ReadAllBytes($after)
-            $n=[Math]::Min($a.Length,$b.Length);$changed=0;$ranges=New-Object System.Collections.Generic.List[object]
-            $start=-1
+            $n=[Math]::Min($a.Length,$b.Length);$changed=0;$ranges=@();$start=-1
             for($i=0;$i -lt $n;$i++){
               if($a[$i] -ne $b[$i]){if($start -lt 0){$start=$i};$changed++}
-              elseif($start -ge 0){if($ranges.Count -lt 80){$ranges.Add([pscustomobject]@{start=$start;end=$i-1;length=$i-$start})};$start=-1}
+              elseif($start -ge 0){if($ranges.Count -lt 80){$ranges += [pscustomobject]@{start=$start;end=$i-1;length=$i-$start}};$start=-1}
             }
-            if($start -ge 0 -and $ranges.Count -lt 80){$ranges.Add([pscustomobject]@{start=$start;end=$n-1;length=$n-$start})}
-            [pscustomobject]@{overlap_bytes=$n;changed_overlap_bytes=$changed;before_bytes=$a.Length;after_bytes=$b.Length;size_delta=$b.Length-$a.Length;first_ranges=@($ranges)}
+            if($start -ge 0 -and $ranges.Count -lt 80){$ranges += [pscustomobject]@{start=$start;end=$n-1;length=$n-$start}}
+            [pscustomobject]@{overlap_bytes=$n;changed_overlap_bytes=$changed;before_bytes=$a.Length;after_bytes=$b.Length;size_delta=$b.Length-$a.Length;first_ranges=$ranges}
           }
-
-          $sourceCopy=Join-Path $env:RUNNER_TEMP 'Basic_source_untouched.flp'
-          Copy-Item $env:CANDIDATE_PATH $sourceCopy -Force
-          $sourceSummary=Summary $sourceCopy
-          Stop-Fl
-          $p=Start-Process $env:FL64_PATH -ArgumentList ('"'+$env:CANDIDATE_PATH+'"') -PassThru
-          Start-Sleep 15
-          $firstOpen=Snapshot-Fl
-          Shot (Join-Path $env:RUNNER_TEMP '01-first-open.png')
-          $w=Activate-Fl
-          $w.SendKeys('{ENTER}')
-          Start-Sleep 3
-          $preSave=Snapshot-Fl
-          $preSaveHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
-          $w=Activate-Fl
-          $w.SendKeys('^s')
-          Start-Sleep 5
-          # Trial builds can show a save warning; confirm it once and allow disk write to settle.
-          $w=Activate-Fl
-          $w.SendKeys('{ENTER}')
-          Start-Sleep 12
-          $postSave=Snapshot-Fl
-          Shot (Join-Path $env:RUNNER_TEMP '02-after-save.png')
-          $savedSummary=Summary $env:CANDIDATE_PATH
-          $diff=Diff-Summary $sourceCopy $env:CANDIDATE_PATH
-          Stop-Fl
-
-          $p2=Start-Process $env:FL64_PATH -ArgumentList ('"'+$env:CANDIDATE_PATH+'"') -PassThru
-          Start-Sleep 15
-          $reopenBefore=Snapshot-Fl
-          Shot (Join-Path $env:RUNNER_TEMP '03-reopen-before-enter.png')
-          $w=Activate-Fl
-          $w.SendKeys('{ENTER}')
-          Start-Sleep 6
-          $reopenAfter=Snapshot-Fl
-          Shot (Join-Path $env:RUNNER_TEMP '04-reopen-after-enter.png')
-          $reopenHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
-          Stop-Fl
-
-          $install=@{}
-          Get-Content (Join-Path $env:RUNNER_TEMP 'install.txt') | ForEach-Object { $k,$v=$_.Split('=',2);$install[$k]=$v }
-          $out=[ordered]@{
-            schema='flp13.native-stock-basic-upgrade.v1';
-            runner_os=[Environment]::OSVersion.VersionString;
-            installer=$install;
-            source=$sourceSummary;
-            first_open=$firstOpen;
-            pre_save=$preSave;
-            pre_save_sha256=$preSaveHash;
-            after_save=$postSave;
-            saved=$savedSummary;
-            source_to_saved_diff=$diff;
-            clean_reopen_before_enter=$reopenBefore;
-            clean_reopen_after_enter=$reopenAfter;
-            reopen_sha256=$reopenHash;
-            reopen_byte_stable=($reopenHash -eq $savedSummary.sha256);
-            interpretation=[ordered]@{
-              save_changed_bytes=($savedSummary.sha256 -ne $sourceSummary.sha256);
-              source_version_markers=$sourceSummary.version_strings;
-              saved_version_markers=$savedSummary.version_strings;
-              candidate_open_did_not_mutate_before_save=($preSaveHash -eq $sourceSummary.sha256)
-            }
-          }
-          $json=Join-Path $env:RUNNER_TEMP 'flp13-native-basic-upgrade.json'
-          $out|ConvertTo-Json -Depth 10|Set-Content $json -Encoding utf8
-          Get-Content $json
+          $sourceCopy=Join-Path $env:RUNNER_TEMP 'Basic_source_untouched.flp';Copy-Item $env:CANDIDATE_PATH $sourceCopy -Force
+          $sourceSummary=Summary $sourceCopy;Stop-Fl
+          $p=Start-Process $env:FL64_PATH -ArgumentList ('"'+$env:CANDIDATE_PATH+'"') -PassThru;Start-Sleep 15
+          $firstOpen=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '01-first-open.png')
+          $w=Activate-Fl;$w.SendKeys('{ENTER}');Start-Sleep 3
+          $preSave=Snapshot-Fl;$preSaveHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          $w=Activate-Fl;$w.SendKeys('^s');Start-Sleep 5
+          $w=Activate-Fl;$w.SendKeys('{ENTER}');Start-Sleep 12
+          $postSave=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '02-after-save.png')
+          $savedSummary=Summary $env:CANDIDATE_PATH;$diff=Diff-Summary $sourceCopy $env:CANDIDATE_PATH;Stop-Fl
+          $p2=Start-Process $env:FL64_PATH -ArgumentList ('"'+$env:CANDIDATE_PATH+'"') -PassThru;Start-Sleep 15
+          $reopenBefore=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '03-reopen-before-enter.png')
+          $w=Activate-Fl;$w.SendKeys('{ENTER}');Start-Sleep 6
+          $reopenAfter=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '04-reopen-after-enter.png')
+          $reopenHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant();Stop-Fl
+          $install=@{};Get-Content (Join-Path $env:RUNNER_TEMP 'install.txt') | ForEach-Object { $k,$v=$_.Split('=',2);$install[$k]=$v }
+          $out=[ordered]@{schema='flp13.native-stock-basic-upgrade.v2';runner_os=[Environment]::OSVersion.VersionString;installer=$install;source=$sourceSummary;first_open=$firstOpen;pre_save=$preSave;pre_save_sha256=$preSaveHash;after_save=$postSave;saved=$savedSummary;source_to_saved_diff=$diff;clean_reopen_before_enter=$reopenBefore;clean_reopen_after_enter=$reopenAfter;reopen_sha256=$reopenHash;reopen_byte_stable=($reopenHash -eq $savedSummary.sha256);interpretation=[ordered]@{save_changed_bytes=($savedSummary.sha256 -ne $sourceSummary.sha256);source_version_markers=$sourceSummary.version_strings;saved_version_markers=$savedSummary.version_strings;candidate_open_did_not_mutate_before_save=($preSaveHash -eq $sourceSummary.sha256)}}
+          $json=Join-Path $env:RUNNER_TEMP 'flp13-native-basic-upgrade.json';$out|ConvertTo-Json -Depth 10|Set-Content $json -Encoding utf8;Get-Content $json
 
       - name: Upload evidence
         if: always()
