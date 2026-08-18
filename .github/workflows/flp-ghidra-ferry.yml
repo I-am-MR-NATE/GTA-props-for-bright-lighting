@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Download exact official Ghidra release
+      - name: Download and split exact official Ghidra release
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -29,14 +29,27 @@ jobs:
           curl -fL --retry 4 --retry-all-errors -o ghidra_12.1.2_PUBLIC_20260605.zip "$url"
           got="$(sha256sum ghidra_12.1.2_PUBLIC_20260605.zip | awk '{print $1}')"
           test "$got" = "$expected"
-          printf 'url=%s\nsha256=%s\nbytes=%s\n' "$url" "$got" "$(stat -c %s ghidra_12.1.2_PUBLIC_20260605.zip)" > GHIDRA_FERRY_RECEIPT.txt
-      - name: Upload verified Ghidra
+          bytes="$(stat -c %s ghidra_12.1.2_PUBLIC_20260605.zip)"
+          printf 'url=%s\nsha256=%s\nbytes=%s\n' "$url" "$got" "$bytes" > GHIDRA_FERRY_RECEIPT.txt
+          split -b 280M -d -a 2 ghidra_12.1.2_PUBLIC_20260605.zip ghidra_12.1.2_PUBLIC_20260605.zip.part-
+          test -f ghidra_12.1.2_PUBLIC_20260605.zip.part-00
+          test -f ghidra_12.1.2_PUBLIC_20260605.zip.part-01
+          cat ghidra_12.1.2_PUBLIC_20260605.zip.part-* | sha256sum | grep -q "^${expected}  -$"
+      - name: Upload part 00
         uses: actions/upload-artifact@v4
         with:
-          name: flp-ghidra-12.1.2-verified
+          name: flp-ghidra-12.1.2-part-00
           path: |
-            ghidra_12.1.2_PUBLIC_20260605.zip
+            ghidra_12.1.2_PUBLIC_20260605.zip.part-00
             GHIDRA_FERRY_RECEIPT.txt
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-ghidra-12.1.2-part-01
+          path: ghidra_12.1.2_PUBLIC_20260605.zip.part-01
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
