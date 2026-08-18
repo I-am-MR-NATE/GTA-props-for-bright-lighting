@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - uses: actions/setup-node@v4
         with:
@@ -32,24 +32,25 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          rm -rf out _src python311
-          mkdir -p out/pyflp_site out/flpdiff out/ts-flp _src python311
+          rm -rf out _src python310
+          mkdir -p out/pyflp_site out/flpdiff out/ts-flp _src python310
 
+          # PyFLP 2.2.1 declares f-enum on <=3.10 and enables it at import time.
+          # Preserve that supported dependency/runtime combination exactly.
           python -m pip install --disable-pip-version-check --no-compile --target out/pyflp_site 'pyflp==2.2.1'
           PYTHONPATH="$PWD/out/pyflp_site" python - <<'PY'
           import importlib.metadata as md
           import pyflp
           print('pyflp', md.version('pyflp'), pyflp.__file__)
+          print('f-enum', md.version('f-enum'))
           assert md.version('pyflp') == '2.2.1'
           PY
 
-          # Carry a relocatable copy of the setup-python 3.11 runtime so the
-          # exact PyFLP pin can execute on workers whose system Python is newer.
           PY_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
-          cp -a "$PY_PREFIX/bin" python311/
-          cp -a "$PY_PREFIX/lib" python311/
-          find python311 -type d \( -name '__pycache__' -o -name 'test' -o -name 'tests' \) -prune -exec rm -rf {} + || true
-          python311/bin/python3.11 --version
+          cp -a "$PY_PREFIX/bin" python310/
+          cp -a "$PY_PREFIX/lib" python310/
+          find python310 -type d \( -name '__pycache__' -o -name 'test' -o -name 'tests' \) -prune -exec rm -rf {} + || true
+          python310/bin/python3.10 --version
 
           git clone --filter=blob:none https://github.com/dawhubapp/flpdiff.git _src/flpdiff
           git -C _src/flpdiff checkout --detach df4faf3297ab49d674cc53502a9691b8c2d68dad
@@ -75,25 +76,26 @@ jobs:
           python --version > out/PYTHON_VERSION.txt
           node --version > out/NODE_VERSION.txt
           bun --version > out/BUN_VERSION.txt
-          printf 'pyflp=2.2.1\nflpdiff_commit=df4faf3297ab49d674cc53502a9691b8c2d68dad\nts_flp_commit=0fe4ef5db4fc4b62733a061109247907a8c68795\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/RECEIPT.txt
+          printf 'pyflp=2.2.1\npython=3.10\nflpdiff_commit=df4faf3297ab49d674cc53502a9691b8c2d68dad\nts_flp_commit=0fe4ef5db4fc4b62733a061109247907a8c68795\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > out/RECEIPT.txt
           find out -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > out/SHA256SUMS.txt
-          find python311 -type f -print0 | sort -z | xargs -0 sha256sum > python311/SHA256SUMS.txt
-          du -sh out python311
+          find python310 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > python310/SHA256SUMS.txt
+          du -sh out python310
 
       - name: Upload exact parser runtime
         uses: actions/upload-artifact@v4
         with:
-          name: flp-parser-runtime-exact-v2
+          name: flp-parser-runtime-exact-v3
           path: out
+          include-hidden-files: true
           compression-level: 1
           retention-days: 30
           if-no-files-found: error
 
-      - name: Upload portable Python 3.11
+      - name: Upload portable Python 3.10
         uses: actions/upload-artifact@v4
         with:
-          name: flp-python311-portable
-          path: python311
+          name: flp-python310-portable
+          path: python310
           compression-level: 1
           retention-days: 30
           if-no-files-found: error
