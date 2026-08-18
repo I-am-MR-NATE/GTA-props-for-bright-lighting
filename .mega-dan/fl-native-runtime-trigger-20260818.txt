@@ -1,1 +1,1 @@
-trigger 2026-08-18 native FL runtime observation
+trigger 2026-08-18 native FL runtime hash-stability follow-up
