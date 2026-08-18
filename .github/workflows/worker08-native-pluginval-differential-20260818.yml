@@ -1,0 +1,137 @@
+name: Worker08 Native Image-Line Pluginval Differential 20260818
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/worker08-native-pluginval-differential-20260818.yml'
+      - '.mega-dan/worker08-native-pluginval-differential-trigger.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Install current official FL Studio and materialise pluginval
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $obs = Join-Path $env:RUNNER_TEMP 'worker08-obs'
+          New-Item -ItemType Directory -Force -Path $obs | Out-Null
+
+          $installer = Join-Path $env:RUNNER_TEMP 'flstudio-latest.exe'
+          Invoke-WebRequest -UseBasicParsing 'https://support.image-line.com/redirect/flstudio_win_installer' -OutFile $installer
+          $installerBytes = (Get-Item $installer).Length
+          if ($installerBytes -lt 100MB) { throw "FL installer implausibly small: $installerBytes" }
+          $mz = [IO.File]::ReadAllBytes($installer)[0..1]
+          if ($mz[0] -ne 0x4d -or $mz[1] -ne 0x5a) { throw 'FL installer missing MZ signature' }
+          $installerSha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $ip = Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
+          $installerExit = $ip.ExitCode
+          Start-Sleep -Seconds 5
+
+          $fl = Get-ChildItem 'C:\Program Files\Image-Line' -Recurse -Filter FL64.exe -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+          if (-not $fl) { throw "FL64.exe not found after installer exit $installerExit" }
+          $flSha = (Get-FileHash $fl.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $flVersion = $fl.VersionInfo.FileVersion
+
+          $zip = Join-Path $env:RUNNER_TEMP 'pluginval_Windows.zip'
+          $pvDir = Join-Path $env:RUNNER_TEMP 'pluginval'
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $pvDir -Force
+          $pv = Get-ChildItem $pvDir -Recurse -Filter pluginval.exe | Select-Object -First 1
+          if (-not $pv) { throw 'pluginval.exe missing' }
+          $pvSha = (Get-FileHash $pv.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          "OBS=$obs" | Out-File $env:GITHUB_ENV -Append
+          "FL64=$($fl.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "FLROOT=$(Split-Path -Parent $fl.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "FL_SHA=$flSha" | Out-File $env:GITHUB_ENV -Append
+          "FL_VERSION=$flVersion" | Out-File $env:GITHUB_ENV -Append
+          "INSTALLER_SHA=$installerSha" | Out-File $env:GITHUB_ENV -Append
+          "INSTALLER_BYTES=$installerBytes" | Out-File $env:GITHUB_ENV -Append
+          "INSTALLER_EXIT=$installerExit" | Out-File $env:GITHUB_ENV -Append
+          "PLUGINVAL=$($pv.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "PLUGINVAL_SHA=$pvSha" | Out-File $env:GITHUB_ENV -Append
+
+          [ordered]@{
+            observed_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+            runner_os = [Environment]::OSVersion.VersionString
+            installer_sha256 = $installerSha
+            installer_bytes = [int64]$installerBytes
+            installer_exit = $installerExit
+            fl64_path = $fl.FullName
+            fl64_sha256 = $flSha
+            fl64_file_version = $flVersion
+            pluginval_path = $pv.FullName
+            pluginval_sha256 = $pvSha
+          } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $obs 'environment.json')
+
+      - name: Run one native validator process per real Image-Line plug-in
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $obs = $env:OBS
+          $root = $env:FLROOT
+          $all = @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue)
+
+          $targets = [ordered]@{
+            'Tuner' = ($all | Where-Object { $_.FullName -match '\\Tuner\\engine_x64\.dll$' } | Select-Object -First 1)
+            'Fruity Delay 3' = ($all | Where-Object { $_.FullName -match '\\Fruity Delay 3\\engine_x64\.dll$' } | Select-Object -First 1)
+            'Frequency Splitter' = ($all | Where-Object { $_.FullName -match '\\Frequency Splitter\\engine_x64\.dll$' } | Select-Object -First 1)
+            'DirectWave' = ($all | Where-Object { $_.Name -ieq 'DirectWave_x64.dll' } | Select-Object -First 1)
+          }
+
+          function Invoke-PluginvalOne([string]$Name, $File) {
+            if (-not $File) { return [ordered]@{ name=$Name; found=$false; classification='not_found' } }
+            $beforeHash = (Get-FileHash $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $beforeWrite = $File.LastWriteTimeUtc.ToString('o')
+            $safe = ($Name -replace '[^A-Za-z0-9]+','_').Trim('_').ToLowerInvariant()
+            $stdoutPath = Join-Path $obs "pluginval_${safe}_stdout.txt"
+            $stderrPath = Join-Path $obs "pluginval_${safe}_stderr.txt"
+            $startUtc = (Get-Date).ToUniversalTime()
+
+            $psi = [Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $env:PLUGINVAL
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            foreach ($arg in @('--validate-in-process','--strictness-level','5','--output-dir',$obs,$File.FullName)) { [void]$psi.ArgumentList.Add($arg) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $psi; [void]$p.Start()
+            $outTask = $p.StandardOutput.ReadToEndAsync(); $errTask = $p.StandardError.ReadToEndAsync()
+            $timedOut = -not $p.WaitForExit(90000)
+            if ($timedOut) { try { $p.Kill($true) } catch {}; try { [void]$p.WaitForExit(5000) } catch {} }
+            $stdout = ''; $stderr = ''
+            try { $stdout = $outTask.GetAwaiter().GetResult() } catch {}; try { $stderr = $errTask.GetAwaiter().GetResult() } catch {}
+            Set-Content -Encoding UTF8 $stdoutPath $stdout; Set-Content -Encoding UTF8 $stderrPath $stderr
+            $combined = $stdout + "`n" + $stderr
+            $exitCode = if ($timedOut) { $null } else { $p.ExitCode }
+            $hasSuccess = [bool]([regex]::IsMatch($combined, '(?m)^SUCCESS\s*$'))
+            $hasFailed = [bool]([regex]::IsMatch($combined, '\*\*\* FAILED:'))
+            $ids = @([regex]::Matches($combined, 'VST-[A-Za-z0-9_.-]+') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+            $classification = if ($timedOut) { 'validator_timeout' } elseif ($exitCode -eq 0 -and $hasSuccess -and -not $hasFailed) { 'pluginval_validation_passed' } elseif ($hasFailed) { 'validator_reported_failure' } else { "validator_exit_$exitCode" }
+            $afterFile = Get-Item $File.FullName
+            $afterHash = (Get-FileHash $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            [ordered]@{
+              name=$Name; found=$true; path=$File.FullName; bytes=[int64]$File.Length; sha256_before=$beforeHash; sha256_after=$afterHash; bytes_stable=($beforeHash -eq $afterHash); last_write_utc_before=$beforeWrite; last_write_utc_after=$afterFile.LastWriteTimeUtc.ToString('o'); strictness=5; validate_in_process=$true; timeout_seconds=90; process_timed_out=$timedOut; exit_code=$exitCode; terminal_success=$hasSuccess; failed_marker=$hasFailed; identifiers=$ids; classification=$classification; started_utc=$startUtc.ToString('o'); ended_utc=(Get-Date).ToUniversalTime().ToString('o'); stdout_file=(Split-Path -Leaf $stdoutPath); stderr_file=(Split-Path -Leaf $stderrPath)
+            }
+          }
+
+          $results = @(); foreach ($kv in $targets.GetEnumerator()) { $results += Invoke-PluginvalOne $kv.Key $kv.Value }
+          $results | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $obs 'pluginval_differential.json')
+          $since = (Get-Date).AddMinutes(-15)
+          try { Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$since} -ErrorAction Stop | Where-Object { $_.LevelDisplayName -in @('Error','Warning') -or $_.Message -match 'pluginval|engine_x64|DirectWave' } | Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-List | Out-String -Width 300 | Set-Content -Encoding UTF8 (Join-Path $obs 'application_events.txt') } catch { "Get-WinEvent failed: $($_.Exception.Message)" | Set-Content -Encoding UTF8 (Join-Path $obs 'application_events.txt') }
+          Get-Content (Join-Path $obs 'pluginval_differential.json')
+
+      - name: Upload exact runtime observation
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker08-native-pluginval-differential-20260818
+          path: ${{ runner.temp }}/worker08-obs
+          if-no-files-found: error
+          retention-days: 3
