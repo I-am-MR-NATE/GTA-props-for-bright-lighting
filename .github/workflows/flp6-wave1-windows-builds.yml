@@ -1,0 +1,96 @@
+name: FLP6 Wave1 Windows Build Closeout
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp6-wave1-windows-builds.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vst3validator:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Clone exact VST3 SDK recursively
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_build\vst3validator'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $pin='3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96'
+          git init -q (Join-Path $root 'repo')
+          git -C (Join-Path $root 'repo') remote add origin https://github.com/steinbergmedia/vst3sdk.git
+          git -C (Join-Path $root 'repo') fetch -q --depth=1 origin $pin
+          git -C (Join-Path $root 'repo') checkout -q --detach FETCH_HEAD
+          if((git -C (Join-Path $root 'repo') rev-parse HEAD) -ne $pin){throw 'SDK pin mismatch'}
+          git -C (Join-Path $root 'repo') submodule update --init --recursive
+          git -C (Join-Path $root 'repo') submodule status --recursive | Set-Content (Join-Path $root 'SUBMODULE_STATUS.txt')
+          if(-not (Select-String -Path (Join-Path $root 'SUBMODULE_STATUS.txt') -SimpleMatch '586dc5e6c8012c3e4b01c79389375cbe96bdb1da public.sdk')){throw 'public.sdk pin mismatch'}
+          "pin=$pin`ntree=$(git -C (Join-Path $root 'repo') rev-parse 'HEAD^{tree}')`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'IDENTITY.txt')
+      - name: Build and self-test official validator
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_build\vst3validator'
+          $repo=Join-Path $root 'repo'; $build=Join-Path $root 'build'; $release=Join-Path $root 'runtime'
+          New-Item -ItemType Directory -Force -Path $release | Out-Null
+          cmake -S $repo -B $build -A x64 -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF 2>&1 | Tee-Object (Join-Path $root 'CONFIGURE.log')
+          cmake --build $build --target validator --config Release --parallel 2 2>&1 | Tee-Object (Join-Path $root 'BUILD.log')
+          $v=Get-ChildItem $build -Filter validator.exe -File -Recurse | Select-Object -First 1
+          if(-not $v){throw 'validator.exe not built'}
+          Copy-Item $v.FullName (Join-Path $release 'validator.exe')
+          & (Join-Path $release 'validator.exe') -selftest 2>&1 | Tee-Object (Join-Path $root 'SELFTEST.txt')
+          [pscustomobject]@{Name='validator.exe';Bytes=(Get-Item (Join-Path $release 'validator.exe')).Length;SHA256=(Get-FileHash (Join-Path $release 'validator.exe') -Algorithm SHA256).Hash.ToLower();FileVersion=(Get-Item (Join-Path $release 'validator.exe')).VersionInfo.FileVersion} | ConvertTo-Json | Set-Content (Join-Path $root 'RUNTIME.json')
+          Remove-Item -Recurse -Force $repo,$build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-vst3-validator-windows-runnable
+          path: _build/vst3validator
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
+
+  dynamorio:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Clone exact DynamoRIO source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_build\dynamorio'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $pin='59352ff71fefdb8542fc5bd2ae3b76181a50072e'
+          git init -q (Join-Path $root 'repo')
+          git -C (Join-Path $root 'repo') remote add origin https://github.com/DynamoRIO/dynamorio.git
+          git -C (Join-Path $root 'repo') fetch -q --depth=1 origin $pin
+          git -C (Join-Path $root 'repo') checkout -q --detach FETCH_HEAD
+          if((git -C (Join-Path $root 'repo') rev-parse HEAD) -ne $pin){throw 'DynamoRIO pin mismatch'}
+          "pin=$pin`ntree=$(git -C (Join-Path $root 'repo') rev-parse 'HEAD^{tree}')`nrun_id=$env:GITHUB_RUN_ID" | Set-Content (Join-Path $root 'IDENTITY.txt')
+      - name: Build core DynamoRIO runtime without optional submodule-dependent extensions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_build\dynamorio'; $repo=Join-Path $root 'repo'; $build=Join-Path $root 'build'; $runtime=Join-Path $root 'runtime'
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          cmake -S $repo -B $build -A x64 -DBUILD_TESTS=OFF -DBUILD_SAMPLES=OFF -DBUILD_EXT=OFF -DBUILD_CLIENTS=OFF -DBUILD_DOCS=OFF 2>&1 | Tee-Object (Join-Path $root 'CONFIGURE.log')
+          cmake --build $build --config Release --parallel 2 2>&1 | Tee-Object (Join-Path $root 'BUILD.log')
+          $drrun=Get-ChildItem $build -Filter drrun.exe -File -Recurse | Select-Object -First 1
+          $drconfig=Get-ChildItem $build -Filter drconfig.exe -File -Recurse | Select-Object -First 1
+          if(-not $drrun){throw 'drrun.exe not built'}
+          Copy-Item $drrun.FullName (Join-Path $runtime 'drrun.exe')
+          if($drconfig){Copy-Item $drconfig.FullName (Join-Path $runtime 'drconfig.exe')}
+          & (Join-Path $runtime 'drrun.exe') -version 2>&1 | Tee-Object (Join-Path $root 'SMOKE.txt')
+          Get-ChildItem $runtime -File | ForEach-Object {[pscustomobject]@{Name=$_.Name;Bytes=$_.Length;SHA256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower();FileVersion=$_.VersionInfo.FileVersion}} | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $root 'RUNTIME.json')
+          Remove-Item -Recurse -Force $repo,$build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp6-dynamorio-windows-runnable
+          path: _build/dynamorio
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
