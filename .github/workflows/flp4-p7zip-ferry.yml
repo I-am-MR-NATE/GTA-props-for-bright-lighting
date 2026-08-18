@@ -22,10 +22,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y p7zip-full
           mkdir -p _p7zip
+          seven="$(command -v 7z)"
+          resolved="$(readlink -f "$seven")"
           7z i > _p7zip/INFO.txt
-          tar -C / -czf _p7zip/p7zip-linux.tar.gz usr/bin/7z usr/bin/7za usr/lib/p7zip
-          sha256sum _p7zip/p7zip-linux.tar.gz > _p7zip/SHA256SUMS.txt
-          printf 'run_id=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > _p7zip/RECEIPT.txt
+          cp -L "$seven" _p7zip/7z
+          chmod +x _p7zip/7z
+          file _p7zip/7z > _p7zip/FILE_IDENTITY.txt
+          ldd "$resolved" > _p7zip/LDD.txt || true
+          "$seven" | head -8 > _p7zip/VERSION.txt
+          sha256sum _p7zip/7z > _p7zip/SHA256SUMS.txt
+          printf 'source=%s\nresolved=%s\nrun_id=%s\nhead=%s\n' "$seven" "$resolved" "$GITHUB_RUN_ID" "$GITHUB_SHA" > _p7zip/RECEIPT.txt
       - uses: actions/upload-artifact@v4
         with:
           name: flp4-p7zip-linux
