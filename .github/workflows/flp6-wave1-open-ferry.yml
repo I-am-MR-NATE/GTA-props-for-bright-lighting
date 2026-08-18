@@ -1,4 +1,4 @@
-name: FLP6 Wave1 Wine LIEF Ferry
+name: FLP6 Wave1 Recursive Build Closeout
 
 on:
   pull_request:
@@ -11,84 +11,88 @@ permissions:
   contents: read
 
 jobs:
-  wine:
+  dynamorio:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
-      - name: Acquire exact Wine 11.0 source identity
+      - name: Clone exact DynamoRIO identity with recursive gitlinks
         shell: bash
         run: |
           set -Eeuo pipefail
-          root="$GITHUB_WORKSPACE/_closeout/wine"
-          mkdir -p "$root/source" "$root/receipt"
-          pin='db11d0fe6a169c457e23d007e20404643d067aa8'
+          root="$GITHUB_WORKSPACE/_build/dynamorio"
+          pin='59352ff71fefdb8542fc5bd2ae3b76181a50072e'
+          mkdir -p "$root/receipt" "$root/release"
           git init -q "$root/repo"
-          git -C "$root/repo" remote add origin https://github.com/wine-mirror/wine.git
+          git -C "$root/repo" remote add origin https://github.com/DynamoRIO/dynamorio.git
           git -C "$root/repo" fetch -q --depth=1 origin "$pin"
           git -C "$root/repo" checkout -q --detach FETCH_HEAD
-          actual="$(git -C "$root/repo" rev-parse HEAD)"
-          tree="$(git -C "$root/repo" rev-parse 'HEAD^{tree}')"
-          test "$actual" = "$pin"
-          git -C "$root/repo" archive --format=tar "$pin" | gzip -9 > "$root/source/wine-${pin}.tar.gz"
-          git -C "$root/repo" ls-tree -r --full-tree "$pin" > "$root/receipt/GIT_TREE.txt"
-          git -C "$root/repo" submodule status --recursive > "$root/receipt/SUBMODULE_STATUS.txt" 2>&1 || true
-          find "$root/repo" -maxdepth 2 -type f \( -iname 'license*' -o -iname 'copying*' \) -print | sort > "$root/receipt/LICENCE_FILES.txt"
-          sha256sum "$root/source"/* > "$root/receipt/SHA256SUMS.txt"
-          printf 'tool=wine\nversion=11.0\npin_sha=%s\nresolved_sha=%s\ntree_sha=%s\nrun_id=%s\n' "$pin" "$actual" "$tree" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
-          rm -rf "$root/repo"
-      - name: Upload Wine source custody
+          test "$(git -C "$root/repo" rev-parse HEAD)" = "$pin"
+          git -C "$root/repo" submodule update --init --recursive
+          git -C "$root/repo" submodule status --recursive > "$root/receipt/SUBMODULE_STATUS_RECURSIVE.txt"
+          test -z "$(grep '^-' "$root/receipt/SUBMODULE_STATUS_RECURSIVE.txt" || true)"
+          printf 'pin=%s\ntree=%s\n' "$pin" "$(git -C "$root/repo" rev-parse 'HEAD^{tree}')" > "$root/receipt/IDENTITY.txt"
+      - name: Build DynamoRIO release tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$GITHUB_WORKSPACE/_build/dynamorio"
+          cmake -S "$root/repo" -B "$root/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_SAMPLES=OFF > "$root/receipt/CONFIGURE.log" 2>&1
+          cmake --build "$root/build" -j2 > "$root/receipt/BUILD.log" 2>&1
+          while IFS= read -r -d '' f; do cp "$f" "$root/release/"; done < <(find "$root/build" -type f \( -name drrun -o -name drconfig \) -perm -111 -print0)
+          test -f "$root/release/drrun"
+          "$root/release/drrun" -version > "$root/receipt/SMOKE.txt" 2>&1 || "$root/release/drrun" -help > "$root/receipt/SMOKE.txt" 2>&1 || true
+          file "$root/release"/* > "$root/receipt/FILE_TYPES.txt"
+          sha256sum "$root/release"/* > "$root/receipt/SHA256SUMS.txt"
+          rm -rf "$root/repo" "$root/build"
+      - name: Upload DynamoRIO runnable closeout
         uses: actions/upload-artifact@v4
         with:
-          name: flp6-wave1-wine-source
-          path: _closeout/wine
-          compression-level: 1
+          name: flp6-dynamorio-runnable
+          path: _build/dynamorio
           retention-days: 1
+          compression-level: 1
           if-no-files-found: error
 
-  lief:
+  vst3validator:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
+    timeout-minutes: 45
     steps:
-      - name: Acquire exact LIEF 1.0.0 source and canonical Windows asset
+      - name: Clone exact VST3 SDK identity with recursive gitlinks
         shell: bash
         run: |
           set -Eeuo pipefail
-          root="$GITHUB_WORKSPACE/_closeout/lief"
-          mkdir -p "$root/source" "$root/release/all" "$root/receipt"
-          pin='d05b3499b6934137e917c009a4df0a9dc8cb11c5'
-          expected='1ad0799a5e699505f7e4ad31fd196105867cf29fd8b74485f32d02cfaba94fe2'
+          root="$GITHUB_WORKSPACE/_build/vst3validator"
+          pin='3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96'
+          mkdir -p "$root/receipt" "$root/release"
           git init -q "$root/repo"
-          git -C "$root/repo" remote add origin https://github.com/lief-project/LIEF.git
+          git -C "$root/repo" remote add origin https://github.com/steinbergmedia/vst3sdk.git
           git -C "$root/repo" fetch -q --depth=1 origin "$pin"
           git -C "$root/repo" checkout -q --detach FETCH_HEAD
-          actual="$(git -C "$root/repo" rev-parse HEAD)"
-          tree="$(git -C "$root/repo" rev-parse 'HEAD^{tree}')"
-          test "$actual" = "$pin"
-          git -C "$root/repo" archive --format=tar "$pin" | gzip -9 > "$root/source/lief-${pin}.tar.gz"
-          git -C "$root/repo" ls-tree -r --full-tree "$pin" > "$root/receipt/GIT_TREE.txt"
-          gh release view 1.0.0 -R lief-project/LIEF --json assets > "$root/receipt/RELEASE_ASSETS.json"
-          gh release download 1.0.0 -R lief-project/LIEF -D "$root/release/all"
-          match=''
-          while IFS= read -r -d '' f; do
-            h="$(sha256sum "$f" | awk '{print $1}')"
-            if test "$h" = "$expected"; then match="$f"; break; fi
-          done < <(find "$root/release/all" -maxdepth 1 -type f -print0)
-          test -n "$match"
-          mkdir -p "$root/release/canonical"
-          cp "$match" "$root/release/canonical/$(basename "$match")"
-          printf '%s  %s\n' "$expected" "$root/release/canonical/$(basename "$match")" | sha256sum -c -
-          find "$root/release/all" -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort > "$root/receipt/ALL_RELEASE_FILES.txt"
-          rm -rf "$root/release/all"
-          sha256sum "$root/source"/* "$root/release/canonical"/* > "$root/receipt/SHA256SUMS.txt"
-          printf 'tool=lief\nversion=1.0.0\npin_sha=%s\nresolved_sha=%s\ntree_sha=%s\ncanonical_windows_sha256=%s\nrun_id=%s\n' "$pin" "$actual" "$tree" "$expected" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
-          rm -rf "$root/repo"
-      - name: Upload LIEF custody
+          test "$(git -C "$root/repo" rev-parse HEAD)" = "$pin"
+          git -C "$root/repo" submodule update --init --recursive
+          git -C "$root/repo" submodule status --recursive > "$root/receipt/SUBMODULE_STATUS_RECURSIVE.txt"
+          test -z "$(grep '^-' "$root/receipt/SUBMODULE_STATUS_RECURSIVE.txt" || true)"
+          grep '586dc5e6c8012c3e4b01c79389375cbe96bdb1da public.sdk' "$root/receipt/SUBMODULE_STATUS_RECURSIVE.txt"
+          printf 'pin=%s\ntree=%s\n' "$pin" "$(git -C "$root/repo" rev-parse 'HEAD^{tree}')" > "$root/receipt/IDENTITY.txt"
+      - name: Build official VST3 validator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$GITHUB_WORKSPACE/_build/vst3validator"
+          cmake -S "$root/repo" -B "$root/build" -DCMAKE_BUILD_TYPE=Release -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF > "$root/receipt/CONFIGURE.log" 2>&1
+          cmake --build "$root/build" --target validator -j2 > "$root/receipt/BUILD.log" 2>&1
+          val="$(find "$root/build" -type f -name validator -perm -111 | head -n1)"
+          test -n "$val"
+          cp "$val" "$root/release/validator"
+          "$root/release/validator" -selftest > "$root/receipt/SELFTEST.txt" 2>&1
+          file "$root/release/validator" > "$root/receipt/FILE_TYPES.txt"
+          sha256sum "$root/release/validator" > "$root/receipt/SHA256SUMS.txt"
+          rm -rf "$root/repo" "$root/build"
+      - name: Upload VST3 validator runnable closeout
         uses: actions/upload-artifact@v4
         with:
-          name: flp6-wave1-lief
-          path: _closeout/lief
-          compression-level: 1
+          name: flp6-vst3-validator-runnable
+          path: _build/vst3validator
           retention-days: 1
+          compression-level: 1
           if-no-files-found: error
