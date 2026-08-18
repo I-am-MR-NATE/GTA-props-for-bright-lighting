@@ -1,0 +1,35 @@
+name: FLP6 Devtools Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp6-devtools-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download FLP development tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _devtools/wheels
+          python3 --version > _devtools/PYTHON_VERSION.txt
+          python3 -m pip download --dest _devtools/wheels build wheel pytest ruff
+          find _devtools/wheels -type f -print0 | sort -z | xargs -0 sha256sum > _devtools/SHA256SUMS.txt
+          find _devtools/wheels -maxdepth 1 -type f -printf '%f\n' | sort > _devtools/FILES.txt
+          printf 'head=%s\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > _devtools/RECEIPT.txt
+      - name: Upload devtools
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp6-devtools
+          path: _devtools
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
