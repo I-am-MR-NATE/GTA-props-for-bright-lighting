@@ -1,4 +1,4 @@
-name: FLP8 FLP Foundry Python Runtime Ferry
+name: FLP8 FLP Foundry Portable Python Runtime
 
 on:
   pull_request:
@@ -12,19 +12,30 @@ permissions:
 
 jobs:
   ferry:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Set up Python 3.13
         uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
-      - name: Download exact FLP Foundry v0.7.0 runtime dependency closure
+      - name: Install Pedalboard build requirements
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p _runtime/wheels
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libsndfile1-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxrender-dev libxcomposite-dev libxcursor-dev libfreetype6-dev \
+            libasound2-dev
+
+      - name: Download exact FLP Foundry v0.7.0 runtime closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _runtime/wheels _runtime/source
           cat > _runtime/requirements-authoritative.txt <<'EOF'
           luaparser>=3.3.1,<4
           mido>=1.3.3,<2
@@ -33,33 +44,45 @@ jobs:
           psutil>=6.1,<8
           EOF
           python -m pip download --dest _runtime/wheels -r _runtime/requirements-authoritative.txt
-          python -m pip --version > _runtime/PIP_VERSION.txt
-          python --version > _runtime/PYTHON_VERSION.txt 2>&1
-          find _runtime/wheels -maxdepth 1 -type f -printf '%f\n' | sort > _runtime/WHEEL_FILES.txt
-          sha256sum _runtime/wheels/* | sort -k2 > _runtime/SHA256SUMS.txt
-          printf 'run_id=%s\nrun_attempt=%s\nhead=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" > _runtime/RECEIPT.txt
+          python -m pip download --no-binary=pedalboard --no-deps --dest _runtime/source 'pedalboard==0.9.24'
+          rm -f _runtime/wheels/pedalboard-0.9.24-*.whl
 
-      - name: Prove clean offline install and record per-module imports
+      - name: Build exact Pedalboard 0.9.24 with portable SIMD baseline
+        shell: bash
+        env:
+          USE_PORTABLE_SIMD: '1'
+          CFLAGS: '-O2 -mavx'
+          CXXFLAGS: '-O2 -mavx'
+        run: |
+          set -Eeuo pipefail
+          python -m pip wheel --no-deps --wheel-dir _runtime/wheels _runtime/source/pedalboard-0.9.24.tar.gz | tee _runtime/PEDALBOARD_BUILD.txt
+          file _runtime/wheels/pedalboard-0.9.24-*.whl > _runtime/PEDALBOARD_WHEEL_IDENTITY.txt
+
+      - name: Hash final armory and prove fully offline use
         shell: bash
         run: |
           set -Eeuo pipefail
+          python --version > _runtime/PYTHON_VERSION.txt 2>&1
+          python -m pip --version > _runtime/PIP_VERSION.txt
+          find _runtime/wheels -maxdepth 1 -type f -printf '%f\n' | sort > _runtime/WHEEL_FILES.txt
+          sha256sum _runtime/wheels/* | sort -k2 > _runtime/SHA256SUMS.txt
+          sha256sum _runtime/source/* | sort -k2 > _runtime/SOURCE_SHA256SUMS.txt
+          printf 'run_id=%s\nrun_attempt=%s\nhead=%s\nportable_simd=USE_PORTABLE_SIMD=1 -mavx\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" > _runtime/RECEIPT.txt
           python -m venv _proof_venv
           _proof_venv/bin/python -m pip install --no-index --find-links _runtime/wheels -r _runtime/requirements-authoritative.txt | tee _runtime/OFFLINE_INSTALL.txt
           _proof_venv/bin/python -m pip check | tee _runtime/PIP_CHECK.txt
-          : > _runtime/IMPORT_PROOF.txt
-          for mod in luaparser mido pedalboard pefile psutil; do
-            set +e
-            _proof_venv/bin/python -c "import ${mod}; import importlib.metadata as m; print('${mod}', m.version('${mod}'))" >> _runtime/IMPORT_PROOF.txt 2>&1
-            rc=$?
-            set -e
-            printf '%s rc=%s\n' "$mod" "$rc" | tee -a _runtime/IMPORT_PROOF.txt
-          done
+          _proof_venv/bin/python - <<'PY' | tee _runtime/IMPORT_PROOF.txt
+          import importlib.metadata as m
+          for mod in ('luaparser','mido','pedalboard','pefile','psutil'):
+              __import__(mod)
+              print(mod, m.version(mod))
+          PY
 
-      - name: Upload verified runtime artifact
-        if: always()
+      - name: Upload verified portable runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flp8-flp-foundry-v0.7.0-python313-runtime
+          name: flp8-flp-foundry-v0.7.0-python313-portable-runtime
           path: _runtime
           compression-level: 0
           retention-days: 1
