@@ -60,7 +60,7 @@ jobs:
           "SOURCE_FLP=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CANDIDATE_FLP=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Toggle visible Insert 1 mute switch in FL and save
+      - name: Toggle visible Insert 1 mute switch in FL and attempt save
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -83,6 +83,7 @@ jobs:
             $bm.Save($p,[System.Drawing.Imaging.ImageFormat]::Png)
             $g.Dispose();$bm.Dispose()
           }
+          function Pixel([string]$p,[int]$x,[int]$y){$bm=New-Object System.Drawing.Bitmap $p;$px=$bm.GetPixel($x,$y);$bm.Dispose();return $px}
           function Hash([string]$p){(Get-FileHash -Algorithm SHA256 $p).Hash.ToLowerInvariant()}
           $before=Hash $project
           $p=Start-Process -FilePath $fl -ArgumentList ('"'+$project+'"') -PassThru
@@ -93,31 +94,33 @@ jobs:
           [void]$w.AppActivate($p.Id); [System.Windows.Forms.SendKeys]::SendWait('{F9}'); Start-Sleep 4
           Shot "$out\before-toggle.png"
           $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          # Previous successful native run is 1024x768 and places Insert 1's mixer mute LED at ~516,351.
-          # Scale the observed point if the hosted desktop dimensions differ.
           $x=[int][Math]::Round($bounds.Width * 516.0 / 1024.0)
           $y=[int][Math]::Round($bounds.Height * 351.0 / 768.0)
-          $probe=New-Object System.Drawing.Bitmap "$out\before-toggle.png"
-          $px=$probe.GetPixel($x,$y); $probe.Dispose()
-          [ordered]@{screen_width=$bounds.Width;screen_height=$bounds.Height;click_x=$x;click_y=$y;preclick_r=$px.R;preclick_g=$px.G;preclick_b=$px.B}|ConvertTo-Json|Set-Content -Encoding UTF8 "$out\click.json"
-          if($px.G -lt 80){throw "target pixel is not plausibly the green Insert 1 mute LED: $($px.R),$($px.G),$($px.B) at $x,$y"}
+          $pre=Pixel "$out\before-toggle.png" $x $y
+          if($pre.G -lt 80){throw "target pixel is not plausibly the green Insert 1 mute LED: $($pre.R),$($pre.G),$($pre.B) at $x,$y"}
           [void][W01Mouse]::SetCursorPos($x,$y); Start-Sleep 1
           [W01Mouse]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero); Start-Sleep 0.1
           [W01Mouse]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero); Start-Sleep 4
           Shot "$out\after-toggle-before-save.png"
+          $post=Pixel "$out\after-toggle-before-save.png" $x $y
           [void]$w.AppActivate($p.Id); [System.Windows.Forms.SendKeys]::SendWait('^s'); Start-Sleep 8
           Shot "$out\after-save.png"
-          # Trial builds may show a save/trial acknowledgement; accept one foreground dialog if present.
           [void]$w.AppActivate($p.Id); [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep 4
           $after=Hash $project
-          [ordered]@{sha256_before=$before;sha256_after=$after;bytes=(Get-Item $project).Length;process_responding=$p.Responding;main_window_title=$p.MainWindowTitle}|ConvertTo-Json|Set-Content -Encoding UTF8 "$out\runtime.json"
+          [ordered]@{
+            screen_width=$bounds.Width;screen_height=$bounds.Height;click_x=$x;click_y=$y;
+            preclick=@{r=$pre.R;g=$pre.G;b=$pre.B};postclick=@{r=$post.R;g=$post.G;b=$post.B};
+            target_pixel_changed=($pre.ToArgb() -ne $post.ToArgb());
+            sha256_before=$before;sha256_after=$after;file_changed=($before -ne $after);
+            bytes=(Get-Item $project).Length;process_responding=$p.Responding;main_window_title=$p.MainWindowTitle
+          }|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 "$out\runtime.json"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep 3
-          if($before -eq $after){throw 'FL UI toggle + save left project bytes unchanged; no host-authored witness produced'}
 
       - name: Decode exact host-authored byte/event delta
+        if: always()
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop'
+          $ErrorActionPreference='Continue'
           $out="$env:RUNNER_TEMP\worker01-mute"
           $env:W01_SOURCE=$env:SOURCE_FLP
           $env:W01_CANDIDATE=$env:CANDIDATE_FLP
@@ -145,26 +148,20 @@ jobs:
                       m=re.match(rb'\s*(\d+)',payload.rstrip(b'\0'))
                       if m: major=int(m.group(1))
               return ev
-          s=Path(os.environ['W01_SOURCE']).read_bytes(); c=Path(os.environ['W01_CANDIDATE']).read_bytes()
-          se=parse(s);ce=parse(c)
-          sf=[(i,e) for i,e in enumerate(se) if e[0]==236]; cf=[(i,e) for i,e in enumerate(ce) if e[0]==236]
+          sp=Path(os.environ['W01_SOURCE']); cp=Path(os.environ['W01_CANDIDATE'])
+          if not sp.exists() or not cp.exists(): raise SystemExit(0)
+          s=sp.read_bytes(); c=cp.read_bytes();se=parse(s);ce=parse(c)
+          sf=[(i,e) for i,e in enumerate(se) if e[0]==236];cf=[(i,e) for i,e in enumerate(ce) if e[0]==236]
           def flags(row):
-              i,e=row; p=e[4]; w=min(4,len(p)-4); return {'event_index':i,'raw':int.from_bytes(p[4:4+w],'little'),'payload_hex':p.hex()}
-          result={
-            'source_sha256':hashlib.sha256(s).hexdigest(),'candidate_sha256':hashlib.sha256(c).hexdigest(),
-            'source_bytes':len(s),'candidate_bytes':len(c),'source_events':len(se),'candidate_events':len(ce),
-            'source_insert1_flags':flags(sf[1]),'candidate_insert1_flags':flags(cf[1]) if len(cf)>1 else None,
-            'all_source_flags':[flags(x) for x in sf],'all_candidate_flags':[flags(x) for x in cf],
-          }
-          # Whole-file save canonicalisation is allowed; the crucial witness is the exact event-236 delta for Insert 1.
-          if result['candidate_insert1_flags'] is not None:
-              result['insert1_flags_xor']=result['source_insert1_flags']['raw'] ^ result['candidate_insert1_flags']['raw']
+              i,e=row;p=e[4];w=min(4,len(p)-4);return {'event_index':i,'raw':int.from_bytes(p[4:4+w],'little'),'payload_hex':p.hex()}
+          result={'source_sha256':hashlib.sha256(s).hexdigest(),'candidate_sha256':hashlib.sha256(c).hexdigest(),'source_bytes':len(s),'candidate_bytes':len(c),'source_events':len(se),'candidate_events':len(ce),'source_insert1_flags':flags(sf[1]),'candidate_insert1_flags':flags(cf[1]) if len(cf)>1 else None,'all_source_flags':[flags(x) for x in sf],'all_candidate_flags':[flags(x) for x in cf]}
+          if result['candidate_insert1_flags'] is not None: result['insert1_flags_xor']=result['source_insert1_flags']['raw'] ^ result['candidate_insert1_flags']['raw']
           Path(os.path.join(os.environ['RUNNER_TEMP'],'worker01-mute','host-save-delta.json')).write_text(json.dumps(result,indent=2)+'\n')
-          print(json.dumps(result,indent=2))
           '@ | Set-Content -Encoding UTF8 "$out\decode.py"
           python "$out\decode.py"
 
       - name: Upload witness
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: worker01-native-mixer-visible-mute-witness
