@@ -5,6 +5,10 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/flp-native-windows-install-ferry-v2.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-native-windows-install-ferry-v2.yml'
 
 permissions:
   contents: read
