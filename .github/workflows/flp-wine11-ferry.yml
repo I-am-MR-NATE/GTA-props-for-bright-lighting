@@ -1,4 +1,4 @@
-# trigger: 2026-08-18 wine11 local-runtime
+# trigger: 2026-08-18 wine11 local-runtime v2
 name: FLP Wine 11 Ferry
 
 on:
@@ -31,7 +31,7 @@ jobs:
             --user-agent 'MEGA-DAN-FLP-Builder/1.0' "$url" -o _wine/wine-11.0-amd64-wow64.tar.xz
           actual="$(sha256sum _wine/wine-11.0-amd64-wow64.tar.xz | awk '{print $1}')"
           test "$actual" = "$expected"
-          tar -tf _wine/wine-11.0-amd64-wow64.tar.xz | head -50 > _wine/TAR_HEAD.txt
+          tar -tf _wine/wine-11.0-amd64-wow64.tar.xz > _wine/TAR_LIST.txt
           tar -xf _wine/wine-11.0-amd64-wow64.tar.xz -C _wine
           test -x _wine/wine-11.0-amd64-wow64/bin/wine
           _wine/wine-11.0-amd64-wow64/bin/wine --version | tee _wine/WINE_VERSION.txt
