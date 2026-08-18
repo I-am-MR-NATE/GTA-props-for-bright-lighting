@@ -5,8 +5,6 @@ on:
     branches: [master]
     paths:
       - '.foundry-encrypted-courier-trigger'
-      - 'foundry_request_key.b64'
-      - 'foundry_request_data.b64'
 
 permissions:
   contents: read
@@ -42,13 +40,13 @@ jobs:
           set -Eeuo pipefail
           base="https://raw.githubusercontent.com/I-am-MR-NATE/GTA-props-for-bright-lighting/${HEAD_REF}"
           for n in $(seq 1 120); do
-            if curl -fsSL "$base/foundry_request_key.b64" -o "$RUNNER_TEMP/courier/work/request_key.b64" && \
-               curl -fsSL "$base/foundry_request_data.b64" -o "$RUNNER_TEMP/courier/work/request_data.b64"; then
+            if curl -fsSL "$base/foundry_request_key.b64?nonce=$n" -o "$RUNNER_TEMP/courier/work/request_key.b64" && \
+               curl -fsSL "$base/foundry_request_data.b64?nonce=$n" -o "$RUNNER_TEMP/courier/work/request_data.b64"; then
               test -s "$RUNNER_TEMP/courier/work/request_key.b64"
               test -s "$RUNNER_TEMP/courier/work/request_data.b64"
               exit 0
             fi
-            sleep 5
+            sleep 3
           done
           echo 'encrypted request did not arrive' >&2
           exit 2
