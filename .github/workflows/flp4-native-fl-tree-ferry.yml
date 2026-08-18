@@ -23,9 +23,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path _fl | Out-Null
           $installer=(Resolve-Path _fl).Path + '\flstudio_win64_26.1.4.5589.exe'
           $url='https://support.image-line.com/redirect/flstudio_win_installer'
-          $client=New-Object System.Net.WebClient
-          $client.Headers.Add('User-Agent','MEGA-DAN-FLP-Builder/1.0')
-          $client.DownloadFile($url,$installer)
+          & curl.exe --fail --location --retry 6 --retry-all-errors --connect-timeout 30 --max-time 1800 --user-agent 'MEGA-DAN-FLP-Builder/1.0' $url --output $installer
+          if ($LASTEXITCODE -ne 0) { throw "installer download failed: $LASTEXITCODE" }
           $bytes=(Get-Item $installer).Length
           $sha=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           if ($bytes -ne 1107195744 -or $sha -ne '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3') { throw 'installer identity mismatch' }
