@@ -1,0 +1,43 @@
+name: FLP sha2 Vendor Ferry 20260818
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.sha2-vendor-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Vendor exact sha2 dependency closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/sha2-vendor"
+          mkdir -p "$root/crate" "$root/vendor"
+          cat > "$root/crate/Cargo.toml" <<'EOF'
+          [package]
+          name = "flp-sha2-vendor"
+          version = "0.0.0"
+          edition = "2021"
+          [dependencies]
+          sha2 = "=0.10.9"
+          EOF
+          mkdir -p "$root/crate/src"
+          printf 'fn main() {}\n' > "$root/crate/src/main.rs"
+          (cd "$root/crate" && cargo generate-lockfile && cargo vendor --locked "$root/vendor" > "$root/config.toml")
+          grep -A12 '^name = "sha2"' "$root/crate/Cargo.lock" > "$root/SHA2_LOCK.txt"
+          find "$root/vendor" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/SHA256SUMS.txt"
+      - name: Upload sha2 vendor closure
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-sha2-0.10.9-vendor
+          path: ${{ runner.temp }}/sha2-vendor
+          compression-level: 3
+          retention-days: 1
+          if-no-files-found: error
