@@ -1,0 +1,249 @@
+name: MEGA DAN Worker08 Native Project Plugin Observation 20260818
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.mega-dan/worker08-native-project-plugin-trigger-20260818.txt'
+      - '.github/workflows/mega-dan-worker08-native-project-plugin-observation-20260818.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Install current official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'worker08-native-project-plugin'
+          $obs = Join-Path $work 'obs'
+          New-Item -ItemType Directory -Force -Path $work,$obs | Out-Null
+          $installer = Join-Path $work 'flstudio-latest.exe'
+          $url = 'https://support.image-line.com/redirect/flstudio_win_installer'
+          Invoke-WebRequest -UseBasicParsing $url -OutFile $installer
+          $installerBytes=(Get-Item $installer).Length
+          if ($installerBytes -lt 100MB) { throw "FL installer implausibly small: $installerBytes" }
+          $mz=[IO.File]::ReadAllBytes($installer)[0..1]
+          if ($mz[0] -ne 0x4d -or $mz[1] -ne 0x5a) { throw 'installer missing MZ' }
+          $installerSha=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $proc=Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
+          Start-Sleep -Seconds 5
+          $fl=Get-ChildItem 'C:\Program Files\Image-Line' -Recurse -Filter FL64.exe -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
+          if (-not $fl) { throw "FL64.exe missing after installer exit $($proc.ExitCode)" }
+          $flSha=(Get-FileHash $fl.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $flVersion=$fl.VersionInfo.FileVersion
+          "work=$work" | Out-File $env:GITHUB_ENV -Append
+          "obs=$obs" | Out-File $env:GITHUB_ENV -Append
+          "fl64=$($fl.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "fl64_sha=$flSha" | Out-File $env:GITHUB_ENV -Append
+          "fl64_version=$flVersion" | Out-File $env:GITHUB_ENV -Append
+          "installer_sha=$installerSha" | Out-File $env:GITHUB_ENV -Append
+          "installer_bytes=$installerBytes" | Out-File $env:GITHUB_ENV -Append
+          "installer_exit=$($proc.ExitCode)" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "FL=$($fl.FullName) version=$flVersion sha=$flSha installerExit=$($proc.ExitCode)"
+
+      - name: Materialise Sysinternals Process Monitor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip=Join-Path $env:work 'ProcessMonitor.zip'
+          $dir=Join-Path $env:work 'procmon'
+          Invoke-WebRequest -UseBasicParsing 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile $zip
+          Expand-Archive $zip -DestinationPath $dir -Force
+          $pm=Get-ChildItem $dir -Filter Procmon64.exe -Recurse | Select-Object -First 1
+          if (-not $pm) { throw 'Procmon64.exe missing' }
+          "procmon=$($pm.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "procmon_sha=$((Get-FileHash $pm.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Build exact FLhd-extension project mutant from real stock Bassdrum project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Split-Path -Parent $env:fl64
+          $src=Get-ChildItem $root -Recurse -Filter Bassdrum.flp -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Render tests' } | Select-Object -First 1
+          if (-not $src) { throw 'stock Bassdrum.flp not found' }
+          $plugin=Get-ChildItem $root -Recurse -Filter engine_x64.dll -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\BassDrum\\' } | Select-Object -First 1
+          if (-not $plugin) { throw 'BassDrum engine_x64.dll not found' }
+          $control=Join-Path $env:work 'worker08_bassdrum_control.flp'
+          $mutant=Join-Path $env:work 'worker08_bassdrum_flhd32.flp'
+          Copy-Item $src.FullName $control -Force
+          $b=[IO.File]::ReadAllBytes($src.FullName)
+          if ([Text.Encoding]::ASCII.GetString($b,0,4) -ne 'FLhd') { throw 'source not FLhd' }
+          $old=[BitConverter]::ToUInt32($b,4)
+          if ($old -ne 6) { throw "unexpected stock FLhd size $old" }
+          $ext=[byte[]](0xA1..0xBA)
+          $n=New-Object byte[] ($b.Length + $ext.Length)
+          [Array]::Copy($b,0,$n,0,4)
+          [Array]::Copy([BitConverter]::GetBytes([uint32]32),0,$n,4,4)
+          [Array]::Copy($b,8,$n,8,6)
+          [Array]::Copy($ext,0,$n,14,$ext.Length)
+          [Array]::Copy($b,14,$n,40,$b.Length-14)
+          [IO.File]::WriteAllBytes($mutant,$n)
+          if ([BitConverter]::ToUInt32([IO.File]::ReadAllBytes($mutant),4) -ne 32) { throw 'mutant header size write failed' }
+          "stock_project=$($src.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "control_project=$control" | Out-File $env:GITHUB_ENV -Append
+          "mutant_project=$mutant" | Out-File $env:GITHUB_ENV -Append
+          "plugin_path=$($plugin.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "plugin_sha=$((Get-FileHash $plugin.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append
+          "stock_sha=$((Get-FileHash $src.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append
+          "control_sha=$((Get-FileHash $control -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append
+          "mutant_sha_before=$((Get-FileHash $mutant -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Append
+          "source_flhd_size=$old" | Out-File $env:GITHUB_ENV -Append
+          "mutant_flhd_size=32" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "control=$control mutant=$mutant plugin=$($plugin.FullName)"
+
+      - name: Native Procmon project to plug-in differential
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type @'
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          using System.Collections.Generic;
+          public static class W08Win {
+            public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+            public static string[] Titles(uint targetPid) {
+              var r=new List<string>();
+              EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h,out p); if(p==targetPid && IsWindowVisible(h)){ var s=new StringBuilder(1024); GetWindowText(h,s,s.Capacity); if(s.Length>0) r.Add(s.ToString()); } return true; }, IntPtr.Zero);
+              return r.ToArray();
+            }
+          }
+          '@
+
+          function Stop-W08FL {
+            Get-Process FL64,FL -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+          }
+
+          function Capture-W08([string]$project,[string]$tag,[bool]$attemptSave) {
+            Stop-W08FL
+            $pml=Join-Path $env:obs "$tag.pml"
+            $csv=Join-Path $env:obs "$tag.csv"
+            Remove-Item $pml,$csv -Force -ErrorAction SilentlyContinue
+            & $env:procmon /AcceptEula /Quiet /Minimized /BackingFile $pml | Out-Null
+            Start-Sleep -Seconds 2
+            $beforeSha=(Get-FileHash $project -Algorithm SHA256).Hash.ToLowerInvariant()
+            $beforeBytes=(Get-Item $project).Length
+            $beforeHeader=[BitConverter]::ToUInt32([IO.File]::ReadAllBytes($project),4)
+            $p=Start-Process -FilePath $env:fl64 -ArgumentList @("`"$project`"") -PassThru
+            Start-Sleep -Seconds 18
+            $live=Get-Process -Id $p.Id -ErrorAction SilentlyContinue
+            $titles=@()
+            $modules=@()
+            $responding=$false
+            $mainHandle=0
+            if ($live) {
+              $responding=$live.Responding
+              $mainHandle=$live.MainWindowHandle.ToInt64()
+              $titles=@([W08Win]::Titles([uint32]$live.Id))
+              try { $modules=@($live.Modules | ForEach-Object FileName | Sort-Object -Unique) } catch {}
+            }
+            $saveAttempted=$false
+            $saveSignal=$false
+            if ($attemptSave -and $live -and $live.MainWindowHandle -ne [IntPtr]::Zero) {
+              try {
+                [void][W08Win]::SetForegroundWindow($live.MainWindowHandle)
+                Start-Sleep -Milliseconds 500
+                [System.Windows.Forms.SendKeys]::SendWait('^s')
+                $saveAttempted=$true
+                Start-Sleep -Seconds 12
+                $saveSignal=$true
+                $titles=@([W08Win]::Titles([uint32]$live.Id))
+              } catch { $saveAttempted=$true; $saveSignal=$false }
+            }
+            $afterSha=(Get-FileHash $project -Algorithm SHA256).Hash.ToLowerInvariant()
+            $afterBytes=(Get-Item $project).Length
+            $afterHeader=[BitConverter]::ToUInt32([IO.File]::ReadAllBytes($project),4)
+            if ($live) { Stop-Process -Id $live.Id -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 2
+            & $env:procmon /Terminate | Out-Null
+            Start-Sleep -Seconds 2
+            if (-not (Test-Path $pml)) { throw "Procmon PML missing for $tag" }
+            & $env:procmon /AcceptEula /Quiet /OpenLog $pml /SaveAs $csv | Out-Null
+            if (-not (Test-Path $csv)) { throw "Procmon CSV missing for $tag" }
+            $rows=Import-Csv $csv
+            $projectRows=@($rows | Where-Object { $_.Path -ieq $project })
+            $pluginRows=@($rows | Where-Object { $_.Path -ieq $env:plugin_path })
+            $engineRows=@($rows | Where-Object { $_.Path -match 'FLEngine_x64\.dll$' })
+            $projectOps=@($projectRows | Group-Object 'Process Name','Operation' | Sort-Object Count -Descending | ForEach-Object { [ordered]@{key=$_.Name;count=$_.Count} })
+            $pluginOps=@($pluginRows | Group-Object 'Process Name','Operation' | Sort-Object Count -Descending | ForEach-Object { [ordered]@{key=$_.Name;count=$_.Count} })
+            $pluginProcesses=@($pluginRows | Select-Object -ExpandProperty 'Process Name' -Unique | Sort-Object)
+            $pluginResults=@($pluginRows | Select-Object -ExpandProperty Result -Unique | Sort-Object)
+            $obj=[ordered]@{
+              tag=$tag
+              project=$project
+              project_sha256_before=$beforeSha
+              project_sha256_after=$afterSha
+              project_bytes_before=$beforeBytes
+              project_bytes_after=$afterBytes
+              flhd_size_before=$beforeHeader
+              flhd_size_after=$afterHeader
+              project_mutated=($beforeSha -ne $afterSha)
+              save_attempted=$saveAttempted
+              save_signal_sent=$saveSignal
+              fl_process_alive_after_18s=[bool]$live
+              fl_responding=$responding
+              fl_main_window_handle=$mainHandle
+              window_titles=$titles
+              fl_module_count=$modules.Count
+              bassdrum_module_in_fl_process=[bool](@($modules | Where-Object { $_ -ieq $env:plugin_path }).Count)
+              procmon_rows=$rows.Count
+              project_path_events=$projectRows.Count
+              project_process_operation_counts=$projectOps
+              bassdrum_engine_path=$env:plugin_path
+              bassdrum_engine_events=$pluginRows.Count
+              bassdrum_engine_processes=$pluginProcesses
+              bassdrum_engine_results=$pluginResults
+              bassdrum_engine_process_operation_counts=$pluginOps
+              flengine_x64_events=$engineRows.Count
+            }
+            $obj | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $env:obs "$tag.json")
+            Remove-Item $csv,$pml -Force -ErrorAction SilentlyContinue
+            return $obj
+          }
+
+          $control=Capture-W08 $env:control_project 'control' $false
+          $mutant=Capture-W08 $env:mutant_project 'flhd32' $true
+          $summary=[ordered]@{
+            observed_at_utc=(Get-Date).ToUniversalTime().ToString('o')
+            installer_sha256=$env:installer_sha
+            installer_bytes=[int64]$env:installer_bytes
+            installer_exit=$env:installer_exit
+            fl64_path=$env:fl64
+            fl64_sha256=$env:fl64_sha
+            fl64_file_version=$env:fl64_version
+            procmon_path=$env:procmon
+            procmon_sha256=$env:procmon_sha
+            stock_project=$env:stock_project
+            stock_sha256=$env:stock_sha
+            bassdrum_engine_path=$env:plugin_path
+            bassdrum_engine_sha256=$env:plugin_sha
+            control=$control
+            flhd32_mutant=$mutant
+            native_project_open_control=($control.project_path_events -gt 0 -and $control.fl_process_alive_after_18s)
+            native_project_to_plugin_link_control=($control.project_path_events -gt 0 -and $control.bassdrum_engine_events -gt 0)
+            native_flhd32_project_open=($mutant.project_path_events -gt 0 -and $mutant.fl_process_alive_after_18s)
+            native_flhd32_project_to_plugin_link=($mutant.project_path_events -gt 0 -and $mutant.bassdrum_engine_events -gt 0)
+            native_flhd_save_canonicalized_to_6=($mutant.project_mutated -and $mutant.flhd_size_after -eq 6)
+          }
+          $summary | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 (Join-Path $env:obs 'SUMMARY.json')
+          Get-Content (Join-Path $env:obs 'SUMMARY.json')
+
+      - name: Upload bounded native observation
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker08-native-project-plugin-observation-20260818
+          path: ${{ runner.temp }}/worker08-native-project-plugin/obs/*.json
+          if-no-files-found: error
+          retention-days: 3
