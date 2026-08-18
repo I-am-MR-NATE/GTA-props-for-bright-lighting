@@ -1,0 +1,37 @@
+name: qemu-user Runtime Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/qemu-user-ferry-20260818.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch exact Debian stable QEMU user runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _ferry
+          url='https://deb.debian.org/debian/pool/main/q/qemu/qemu-user_10.0.11+ds-0+deb13u1_amd64.deb'
+          curl --fail --location --retry 5 --retry-all-errors "$url" -o _ferry/qemu-user_10.0.11+ds-0+deb13u1_amd64.deb
+          test "$(stat -c %s _ferry/qemu-user_10.0.11+ds-0+deb13u1_amd64.deb)" -eq 71080424
+          echo '6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df  _ferry/qemu-user_10.0.11+ds-0+deb13u1_amd64.deb' | sha256sum -c -
+          dpkg-deb -I _ferry/qemu-user_10.0.11+ds-0+deb13u1_amd64.deb > _ferry/CONTROL.txt
+          sha256sum _ferry/qemu-user_10.0.11+ds-0+deb13u1_amd64.deb > _ferry/SHA256SUMS.txt
+          printf 'source=%s\nsha256=%s\nbytes=%s\nrun_id=%s\nhead=%s\n' "$url" '6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df' '71080424' "$GITHUB_RUN_ID" "$GITHUB_SHA" > _ferry/RECEIPT.txt
+
+      - name: Upload runtime package
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-user-debian13-amd64
+          path: _ferry
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
