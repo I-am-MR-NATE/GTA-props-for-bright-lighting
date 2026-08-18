@@ -1,0 +1,199 @@
+name: FLP6 Wave1 Open Tool Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp6-wave1-open-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {tool: ghidra, repo: NationalSecurityAgency/ghidra, sha: c0f584bf229fffba61b36431f3ce30c0c3e4e682, tag: Ghidra_12.1.2_build}
+          - {tool: flpdiff, repo: dawhubapp/flpdiff, sha: df4faf3297ab49d674cc53502a9691b8c2d68dad, tag: none}
+          - {tool: undelphi, repo: ATRAPSLLC/undelphi, sha: dc12c62ec32f42b4ae5e9dfe2bb678a762490d53, tag: none}
+          - {tool: pluginval, repo: Tracktion/pluginval, sha: ed19c2c16b57a6d94db391bea3ef4a80b769d5bf, tag: v1.0.4}
+          - {tool: vst3sdk_validator, repo: steinbergmedia/vst3sdk, sha: 3cdf9ca5d1f5b1b21e0a86832aa4abe55607bd96, tag: v3.8.1_build_84}
+          - {tool: detours, repo: microsoft/Detours, sha: e4bfd6b03e50de46b47abfbd1e46b384f0c5f833, tag: v4.0.1}
+          - {tool: frida, repo: frida/frida, sha: 03f16b3b11c5bb945cdb7f6158a84dd57655de4c, tag: 17.17.0}
+          - {tool: dynamorio, repo: DynamoRIO/dynamorio, sha: 59352ff71fefdb8542fc5bd2ae3b76181a50072e, tag: release_11.3.0}
+          - {tool: x64dbg, repo: x64dbg/x64dbg, sha: 9c8ca1cae0b6d56cc44f31fddcb10e3b02ffbb87, tag: 2026.05.27}
+          - {tool: imhex, repo: WerWolv/ImHex, sha: 76cf8771158012095d3b3ed58cc93c27ccfac7df, tag: v1.38.1}
+          - {tool: reclass_net, repo: ReClassNET/ReClass.NET, sha: e6a5c29930def61373d1fcbda7358bf4d9ba996a, tag: v1.2}
+          - {tool: bindiff, repo: google/bindiff, sha: aecc14dcc2e0f06a0f8957dc465a9073215b5920, tag: v8}
+          - {tool: winafl, repo: googleprojectzero/winafl, sha: fd85f38548b14352f4b70ad414f364ea6dc1a769, tag: none}
+          - {tool: libafl, repo: AFLplusplus/LibAFL, sha: 92ad89454765440c7c03b87b11d5dbde753f9633, tag: 0.16.1}
+          - {tool: yabridge, repo: robbert-vdh/yabridge, sha: d9286758c05ae4a1d1385c36b5d041dc84b21b76, tag: 5.1.1}
+          - {tool: proton, repo: ValveSoftware/Proton, sha: d2bedfad453584d05308f5e3e1f9657e3f0f71d3, tag: proton-11.0-1}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Acquire exact source identity
+        shell: bash
+        env:
+          TOOL: ${{ matrix.tool }}
+          REPO: ${{ matrix.repo }}
+          PIN_SHA: ${{ matrix.sha }}
+          PIN_TAG: ${{ matrix.tag }}
+        run: |
+          set -Eeuo pipefail
+          root="$GITHUB_WORKSPACE/_wave/$TOOL"
+          mkdir -p "$root/source" "$root/release" "$root/build" "$root/receipt"
+          git init -q "$root/repo"
+          git -C "$root/repo" remote add origin "https://github.com/$REPO.git"
+          git -C "$root/repo" fetch -q --depth=1 origin "$PIN_SHA"
+          git -C "$root/repo" checkout -q --detach FETCH_HEAD
+          actual="$(git -C "$root/repo" rev-parse HEAD)"
+          test "$actual" = "$PIN_SHA"
+          tree="$(git -C "$root/repo" rev-parse 'HEAD^{tree}')"
+          git -C "$root/repo" archive --format=tar "$PIN_SHA" | gzip -9 > "$root/source/${TOOL}-${PIN_SHA}.tar.gz"
+          git -C "$root/repo" ls-tree -r --full-tree "$PIN_SHA" > "$root/receipt/GIT_TREE.txt"
+          git -C "$root/repo" submodule status --recursive > "$root/receipt/SUBMODULE_STATUS.txt" 2>&1 || true
+          find "$root/repo" -maxdepth 3 -type f \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' \) -print | sort > "$root/receipt/LICENCE_FILES.txt"
+          printf 'tool=%s\nrepo=%s\npin_sha=%s\nresolved_sha=%s\ntree_sha=%s\ntag=%s\nrun_id=%s\n' "$TOOL" "$REPO" "$PIN_SHA" "$actual" "$tree" "$PIN_TAG" "$GITHUB_RUN_ID" > "$root/receipt/IDENTITY.txt"
+
+      - name: Acquire exact release/build payload where available
+        shell: bash
+        env:
+          TOOL: ${{ matrix.tool }}
+          REPO: ${{ matrix.repo }}
+          PIN_SHA: ${{ matrix.sha }}
+          PIN_TAG: ${{ matrix.tag }}
+        run: |
+          set -Eeuo pipefail
+          root="$GITHUB_WORKSPACE/_wave/$TOOL"
+          repo="$root/repo"
+          rel="$root/release"
+          build="$root/build"
+          status="$root/receipt/PAYLOAD_STATUS.txt"
+          : > "$status"
+          case "$TOOL" in
+            ghidra)
+              gh release download "$PIN_TAG" -R "$REPO" -p 'ghidra_12.1.2_PUBLIC_20260605.zip' -D "$rel"
+              printf '%s  %s\n' 'b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d' "$rel/ghidra_12.1.2_PUBLIC_20260605.zip" | sha256sum -c -
+              echo 'release_asset_verified=yes' >> "$status"
+              ;;
+            flpdiff)
+              curl -fsSL https://bun.sh/install | bash
+              export PATH="$HOME/.bun/bin:$PATH"
+              (cd "$repo" && bun install --frozen-lockfile && bun test && bun run build:binary:linux-x64 && bun run build:binary:win-x64)
+              cp "$repo/dist/flpdiff-linux-x64" "$repo/dist/flpdiff-windows-x64.exe" "$rel/"
+              "$rel/flpdiff-linux-x64" --version > "$root/receipt/SMOKE.txt"
+              echo 'exact_source_build=yes' >> "$status"
+              ;;
+            undelphi)
+              if command -v cargo >/dev/null 2>&1; then
+                (cd "$repo" && cargo build --release) > "$root/receipt/BUILD.log" 2>&1 || true
+                find "$repo/target/release" -maxdepth 1 -type f -executable -print -exec cp '{}' "$rel/" \; 2>/dev/null || true
+              fi
+              echo 'source_exact_build_attempted=yes' >> "$status"
+              ;;
+            pluginval)
+              gh release download "$PIN_TAG" -R "$REPO" -p 'pluginval_Linux.zip' -p 'pluginval_Windows.zip' -D "$rel"
+              echo 'linux_and_windows_release_assets=yes' >> "$status"
+              ;;
+            vst3sdk_validator)
+              pub="$root/public_sdk"
+              git init -q "$pub"
+              git -C "$pub" remote add origin https://github.com/steinbergmedia/vst3_public_sdk.git
+              git -C "$pub" fetch -q --depth=1 origin 586dc5e6c8012c3e4b01c79389375cbe96bdb1da
+              git -C "$pub" checkout -q --detach FETCH_HEAD
+              test "$(git -C "$pub" rev-parse HEAD)" = '586dc5e6c8012c3e4b01c79389375cbe96bdb1da'
+              git -C "$pub" archive --format=tar HEAD | gzip -9 > "$root/source/vst3_public_sdk-586dc5e6c8012c3e4b01c79389375cbe96bdb1da.tar.gz"
+              printf 'public_sdk_sha=%s\npublic_sdk_tree=%s\n' "$(git -C "$pub" rev-parse HEAD)" "$(git -C "$pub" rev-parse 'HEAD^{tree}')" >> "$root/receipt/IDENTITY.txt"
+              echo 'sdk_and_public_sdk_exact_sources=yes' >> "$status"
+              ;;
+            detours)
+              echo 'canonical_release_has_no_binary_assets; exact_source_is_payload' >> "$status"
+              ;;
+            frida)
+              assets_json="$root/receipt/RELEASE_ASSETS.json"
+              gh release view "$PIN_TAG" -R "$REPO" --json assets > "$assets_json"
+              python3 - "$assets_json" "$rel" "$REPO" "$PIN_TAG" <<'PY'
+          import json,re,subprocess,sys,pathlib
+          j=json.load(open(sys.argv[1])); out=pathlib.Path(sys.argv[2]); repo=sys.argv[3]; tag=sys.argv[4]
+          wanted=[]
+          for a in j.get('assets',[]):
+              n=a.get('name','')
+              if re.fullmatch(r'frida-(server|inject)-17\.17\.0-linux-x86_64\.xz', n): wanted.append(n)
+          for n in wanted: subprocess.run(['gh','release','download',tag,'-R',repo,'-p',n,'-D',str(out)],check=True)
+          print('downloaded='+','.join(wanted))
+          PY
+              echo 'selected_linux_release_payloads_attempted=yes' >> "$status"
+              ;;
+            dynamorio)
+              cmake -S "$repo" -B "$build/dr" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_SAMPLES=OFF > "$root/receipt/CMAKE.log" 2>&1 || true
+              cmake --build "$build/dr" -j2 >> "$root/receipt/CMAKE.log" 2>&1 || true
+              find "$build/dr" -type f \( -name drrun -o -name drconfig \) -executable -print -exec cp '{}' "$rel/" \; 2>/dev/null || true
+              echo 'stable_exact_source_build_attempted=yes' >> "$status"
+              ;;
+            x64dbg)
+              gh release download "$PIN_TAG" -R "$REPO" -p 'snapshot_2026-05-27_12-11.zip' -D "$rel"
+              printf '%s  %s\n' 'd41966dfc5b435a372798245300ca0ab7bb8e48bdbf48512c6fb20fcca427697' "$rel/snapshot_2026-05-27_12-11.zip" | sha256sum -c -
+              echo 'primary_snapshot_verified=yes' >> "$status"
+              ;;
+            imhex)
+              gh release download "$PIN_TAG" -R "$REPO" -p '*Windows-Portable*x86_64*.zip' -D "$rel" || gh release download "$PIN_TAG" -R "$REPO" -p '*.zip' -D "$rel"
+              match=''
+              while IFS= read -r -d '' f; do
+                h="$(sha256sum "$f" | awk '{print $1}')"
+                if test "$h" = '32520e57712894bc8304c4b01553223e7dda25852326184f99dfd72a09a80187'; then match="$f"; break; fi
+              done < <(find "$rel" -maxdepth 1 -type f -name '*.zip' -print0)
+              test -n "$match"
+              echo "portable_verified=$match" >> "$status"
+              ;;
+            reclass_net)
+              gh release download "$PIN_TAG" -R "$REPO" -p 'ReClass.NET.zip' -D "$rel"
+              test "$(stat -c %s "$rel/ReClass.NET.zip")" = '3332934'
+              echo 'stable_packaged_release=yes' >> "$status"
+              ;;
+            bindiff)
+              gh release download "$PIN_TAG" -R "$REPO" -p 'bindiff8.msi' -D "$rel"
+              test "$(stat -c %s "$rel/bindiff8.msi")" = '72237056'
+              echo 'stable_packaged_release=yes' >> "$status"
+              ;;
+            winafl)
+              echo 'upstream_has_no_tags_or_releases; exact_commit_source_is_identity_payload' >> "$status"
+              ;;
+            libafl)
+              echo 'exact_tag_commit_source_acquired=yes' >> "$status"
+              ;;
+            yabridge)
+              gh release download "$PIN_TAG" -R "$REPO" -p 'yabridge-5.1.1.tar.gz' -D "$rel"
+              test "$(stat -c %s "$rel/yabridge-5.1.1.tar.gz")" = '4351433'
+              echo 'packaged_release_acquired=yes' >> "$status"
+              ;;
+            proton)
+              echo 'upstream_release_has_no_binary_assets; exact_top_level_source_snapshot_acquired=yes' >> "$status"
+              ;;
+          esac
+
+      - name: Final custody manifest
+        shell: bash
+        env:
+          TOOL: ${{ matrix.tool }}
+        run: |
+          set -Eeuo pipefail
+          root="$GITHUB_WORKSPACE/_wave/$TOOL"
+          rm -rf "$root/repo" "$root/public_sdk" "$root/build"
+          find "$root" -type f -print0 | sort -z | xargs -0 sha256sum > "$root/receipt/SHA256SUMS.txt"
+          find "$root" -type f -printf '%P\t%s bytes\n' | sort > "$root/receipt/FILES.txt"
+          printf 'tool=%s\nrun_id=%s\nrun_attempt=%s\n' "$TOOL" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$root/receipt/FERRY.txt"
+
+      - name: Upload exact tool bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp6-wave1-${{ matrix.tool }}
+          path: _wave/${{ matrix.tool }}
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
