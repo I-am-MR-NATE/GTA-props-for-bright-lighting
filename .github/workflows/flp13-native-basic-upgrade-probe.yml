@@ -52,12 +52,20 @@ jobs:
           "SOURCE_SHA256=$expected" | Add-Content (Join-Path $env:RUNNER_TEMP 'install.txt')
           "SOURCE_BYTES=$($src.bytes)" | Add-Content (Join-Path $env:RUNNER_TEMP 'install.txt')
 
-      - name: Native FL open save clean-reopen upgrade observation
+      - name: Native FL open mutate save clean-reopen upgrade observation
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class NativeMouse {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
+          }
+          '@
           function Stop-Fl { Get-Process FL64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
           function Shot([string]$p){
             $b=[Windows.Forms.SystemInformation]::VirtualScreen;$bmp=New-Object Drawing.Bitmap $b.Width,$b.Height;$g=[Drawing.Graphics]::FromImage($bmp)
@@ -71,6 +79,11 @@ jobs:
             foreach($fp in @(Get-Process FL64 -ErrorAction SilentlyContinue)){[void]$w.AppActivate($fp.Id)}
             Start-Sleep -Milliseconds 600
             return $w
+          }
+          function Click-At([int]$x,[int]$y){
+            [void][NativeMouse]::SetCursorPos($x,$y);Start-Sleep -Milliseconds 250
+            [NativeMouse]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero);Start-Sleep -Milliseconds 80
+            [NativeMouse]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero);Start-Sleep -Milliseconds 500
           }
           function Summary([string]$path){
             [byte[]]$b=[IO.File]::ReadAllBytes($path);if($b.Length -lt 22){throw 'FLP too short'}
@@ -95,18 +108,21 @@ jobs:
           $p=Start-Process $env:FL64_PATH -ArgumentList ('"'+$env:CANDIDATE_PATH+'"') -PassThru;Start-Sleep 15
           $firstOpen=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '01-first-open.png')
           $w=Activate-Fl;$w.SendKeys('{ENTER}');Start-Sleep 3
-          $preSave=Snapshot-Fl;$preSaveHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
-          $w=Activate-Fl;$w.SendKeys('^s');Start-Sleep 5
-          $w=Activate-Fl;$w.SendKeys('{ENTER}');Start-Sleep 12
+          $preMutation=Snapshot-Fl;$preMutationHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          # Toggle the first visible step in the first Channel Rack row. This is only to dirty the project so FL must perform a real host save.
+          $w=Activate-Fl;Click-At 597 145;Start-Sleep 2;Shot (Join-Path $env:RUNNER_TEMP '01b-after-ui-mutation.png')
+          $w=Activate-Fl;$w.SendKeys('^s');Start-Sleep 12
           $postSave=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '02-after-save.png')
-          $savedSummary=Summary $env:CANDIDATE_PATH;$diff=Diff-Summary $sourceCopy $env:CANDIDATE_PATH;Stop-Fl
+          $savedSummary=Summary $env:CANDIDATE_PATH;$diff=Diff-Summary $sourceCopy $env:CANDIDATE_PATH
+          if($savedSummary.sha256 -eq $sourceSummary.sha256){throw 'Controlled UI mutation did not produce a changed host-saved FLP'}
+          Stop-Fl
           $p2=Start-Process $env:FL64_PATH -ArgumentList ('"'+$env:CANDIDATE_PATH+'"') -PassThru;Start-Sleep 15
           $reopenBefore=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '03-reopen-before-enter.png')
           $w=Activate-Fl;$w.SendKeys('{ENTER}');Start-Sleep 6
           $reopenAfter=Snapshot-Fl;Shot (Join-Path $env:RUNNER_TEMP '04-reopen-after-enter.png')
           $reopenHash=(Get-FileHash $env:CANDIDATE_PATH -Algorithm SHA256).Hash.ToLowerInvariant();Stop-Fl
           $install=@{};Get-Content (Join-Path $env:RUNNER_TEMP 'install.txt') | ForEach-Object { $k,$v=$_.Split('=',2);$install[$k]=$v }
-          $out=[ordered]@{schema='flp13.native-stock-basic-upgrade.v2';runner_os=[Environment]::OSVersion.VersionString;installer=$install;source=$sourceSummary;first_open=$firstOpen;pre_save=$preSave;pre_save_sha256=$preSaveHash;after_save=$postSave;saved=$savedSummary;source_to_saved_diff=$diff;clean_reopen_before_enter=$reopenBefore;clean_reopen_after_enter=$reopenAfter;reopen_sha256=$reopenHash;reopen_byte_stable=($reopenHash -eq $savedSummary.sha256);interpretation=[ordered]@{save_changed_bytes=($savedSummary.sha256 -ne $sourceSummary.sha256);source_version_markers=$sourceSummary.version_strings;saved_version_markers=$savedSummary.version_strings;candidate_open_did_not_mutate_before_save=($preSaveHash -eq $sourceSummary.sha256)}}
+          $out=[ordered]@{schema='flp13.native-stock-basic-upgrade.v3';runner_os=[Environment]::OSVersion.VersionString;installer=$install;source=$sourceSummary;first_open=$firstOpen;pre_mutation=$preMutation;pre_mutation_sha256=$preMutationHash;controlled_host_mutation='UI toggle of first visible Channel Rack step at screen coordinate 597,145 solely to force a real FL host save';after_save=$postSave;saved=$savedSummary;source_to_saved_diff=$diff;clean_reopen_before_enter=$reopenBefore;clean_reopen_after_enter=$reopenAfter;reopen_sha256=$reopenHash;reopen_byte_stable=($reopenHash -eq $savedSummary.sha256);interpretation=[ordered]@{save_changed_bytes=($savedSummary.sha256 -ne $sourceSummary.sha256);source_version_markers=$sourceSummary.version_strings;saved_version_markers=$savedSummary.version_strings;candidate_open_did_not_mutate_before_save=($preMutationHash -eq $sourceSummary.sha256)}}
           $json=Join-Path $env:RUNNER_TEMP 'flp13-native-basic-upgrade.json';$out|ConvertTo-Json -Depth 10|Set-Content $json -Encoding utf8;Get-Content $json
 
       - name: Upload evidence
@@ -119,6 +135,7 @@ jobs:
             ${{ runner.temp }}/install.txt
             ${{ runner.temp }}/basic-discovery.json
             ${{ runner.temp }}/01-first-open.png
+            ${{ runner.temp }}/01b-after-ui-mutation.png
             ${{ runner.temp }}/02-after-save.png
             ${{ runner.temp }}/03-reopen-before-enter.png
             ${{ runner.temp }}/04-reopen-after-enter.png
