@@ -1,0 +1,47 @@
+name: Worker08 Trim Stock Mixer Evidence
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/worker08-trim-stock-mixer-evidence.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  trim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download completed native runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: worker08-native-stock-mixer-save-probe
+          path: evidence
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: I-am-MR-NATE/GTA-props-for-bright-lighting
+          run-id: 32165028250
+
+      - name: Verify exact source artifact then remove installer payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f evidence/flstudio-latest.exe
+          test -f evidence/oracle-build.json
+          test -f evidence/oracle-decode.json
+          test -f evidence/save-observation.json
+          test -f evidence/fl-saved-decode.json
+          test -f evidence/clean-reopen.json
+          rm -f evidence/flstudio-latest.exe
+          find evidence -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort | tee evidence/FILES.txt
+          (cd evidence && sha256sum * | sort -k2) > evidence/TRIMMED_SHA256SUMS.txt
+
+      - name: Upload compact exact evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker08-native-stock-mixer-save-probe-trimmed
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
