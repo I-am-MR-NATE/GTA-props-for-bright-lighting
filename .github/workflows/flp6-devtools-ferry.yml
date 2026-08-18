@@ -48,7 +48,8 @@ jobs:
           curl --fail --location --retry 5 --retry-all-errors "$url" -o _wine/wine-11.0-amd64-wow64.tar.xz
           printf '%s  %s\n' "$expected" '_wine/wine-11.0-amd64-wow64.tar.xz' | sha256sum -c -
           sha256sum _wine/wine-11.0-amd64-wow64.tar.xz > _wine/SHA256SUMS.txt
-          tar -tf _wine/wine-11.0-amd64-wow64.tar.xz | head -n 30 > _wine/TAR_HEAD.txt
+          tar -tf _wine/wine-11.0-amd64-wow64.tar.xz > _wine/TAR_LIST.txt
+          sed -n '1,30p' _wine/TAR_LIST.txt > _wine/TAR_HEAD.txt
           printf 'source=%s\nexpected_sha256=%s\nhead=%s\nrun_id=%s\nrun_attempt=%s\n' "$url" "$expected" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > _wine/RECEIPT.txt
       - name: Upload Wine
         uses: actions/upload-artifact@v4
