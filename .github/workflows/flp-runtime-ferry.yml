@@ -1,4 +1,4 @@
-# ferry-trigger: 2026-08-18T05:18Z
+# ferry-trigger: 2026-08-18T05:22Z chunked-installer
 name: FLP Runtime Ferry
 
 on:
@@ -31,21 +31,26 @@ jobs:
           find _runtime/python-wheels -maxdepth 1 -type f -printf '%f\n' | sort | tee _runtime/PYTHON_WHEELS.txt
           sha256sum _runtime/python-wheels/* | sort -k2 > _runtime/PYTHON_WHEELS_SHA256SUMS.txt
 
-      - name: Download current official FL Studio Windows installer
+      - name: Download and split current official FL Studio Windows installer
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p _fl
+          mkdir -p _fl _fl_parts _fl_meta
           url='https://support.image-line.com/redirect/flstudio_win_installer'
           curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 3600 \
             --user-agent 'Mozilla/5.0' "$url" -o _fl/flstudio-latest.exe
           bytes="$(stat -c %s _fl/flstudio-latest.exe)"
           test "$bytes" -gt 104857600
           test "$(head -c 2 _fl/flstudio-latest.exe)" = 'MZ'
-          sha256sum _fl/flstudio-latest.exe | tee _fl/SHA256SUMS.txt
-          file _fl/flstudio-latest.exe | tee _fl/FILE_IDENTITY.txt
+          sha256sum _fl/flstudio-latest.exe | tee _fl_meta/INSTALLER_SHA256SUMS.txt
+          file _fl/flstudio-latest.exe | tee _fl_meta/FILE_IDENTITY.txt
           printf 'source_redirect=%s\nrun_id=%s\nrun_attempt=%s\nhead=%s\nbytes=%s\n' \
-            "$url" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$bytes" > _fl/RECEIPT.txt
+            "$url" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$bytes" > _fl_meta/RECEIPT.txt
+          split -b 300M -d -a 2 --additional-suffix=.bin _fl/flstudio-latest.exe _fl_parts/flstudio.part.
+          test "$(find _fl_parts -maxdepth 1 -type f -name 'flstudio.part.*.bin' | wc -l)" -eq 4
+          sha256sum _fl_parts/flstudio.part.*.bin | sort -k2 > _fl_meta/PART_SHA256SUMS.txt
+          find _fl_parts -maxdepth 1 -type f -name 'flstudio.part.*.bin' -printf '%f %s\n' | sort > _fl_meta/PART_BYTES.txt
+          printf '%s\n' flstudio.part.00.bin flstudio.part.01.bin flstudio.part.02.bin flstudio.part.03.bin > _fl_meta/PART_ORDER.txt
 
       - name: Upload runtime wheels
         uses: actions/upload-artifact@v4
@@ -56,11 +61,47 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      - name: Upload FL Studio installer
+      - name: Upload FL Studio metadata
         uses: actions/upload-artifact@v4
         with:
-          name: fl-studio-installer
-          path: _fl
+          name: fl-studio-meta
+          path: _fl_meta
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload FL Studio part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: fl-studio-part-00
+          path: _fl_parts/flstudio.part.00.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload FL Studio part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: fl-studio-part-01
+          path: _fl_parts/flstudio.part.01.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload FL Studio part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: fl-studio-part-02
+          path: _fl_parts/flstudio.part.02.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload FL Studio part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: fl-studio-part-03
+          path: _fl_parts/flstudio.part.03.bin
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
