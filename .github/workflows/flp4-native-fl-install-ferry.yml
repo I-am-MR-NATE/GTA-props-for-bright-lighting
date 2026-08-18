@@ -32,20 +32,31 @@ jobs:
           if ($sha -ne '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3') { throw "installer SHA mismatch $sha" }
           "bytes=$bytes`nsha256=$sha`nsource=$url" | Set-Content -Encoding ascii _fl\INSTALLER_RECEIPT.txt
 
-      - name: Install FL Studio silently on native Windows
+      - name: Install FL Studio silently as SYSTEM
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
-          whoami /all | Out-File -Encoding ascii _fl\WHOAMI.txt
-          cmd /c "net session > _fl\NET_SESSION.txt 2>&1"
+          whoami /all | Tee-Object -FilePath _fl\WHOAMI.txt
+          cmd /c "net session" 2>&1 | Tee-Object -FilePath _fl\NET_SESSION.txt
           $installer=(Resolve-Path _fl\flstudio_win64_26.1.4.5589.exe).Path
-          $p=Start-Process -FilePath $installer -ArgumentList '/S /ALLUSERS=1' -PassThru -Wait
-          "exit_code=$($p.ExitCode)" | Set-Content -Encoding ascii _fl\INSTALL_EXIT.txt
-          if ($p.ExitCode -ne 0) { throw "FL installer exit $($p.ExitCode)" }
-          Start-Sleep -Seconds 5
-          $hits=@(Get-ChildItem 'C:\Program Files\Image-Line','C:\Program Files (x86)\Image-Line' -Filter FL64.exe -Recurse -File -ErrorAction SilentlyContinue)
-          if ($hits.Count -lt 1) { throw 'FL64.exe not found after silent install' }
-          $fl64=$hits | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $task='FLP4NativeFLInstall'
+          $taskCommand='"' + $installer + '" /S /ALLUSERS=1'
+          & schtasks.exe /Create /TN $task /TR $taskCommand /SC ONCE /ST 23:59 /RU SYSTEM /RL HIGHEST /F 2>&1 | Tee-Object -FilePath _fl\SCHTASK_CREATE.txt
+          if ($LASTEXITCODE -ne 0) { throw "schtasks create failed: $LASTEXITCODE" }
+          & schtasks.exe /Run /TN $task 2>&1 | Tee-Object -FilePath _fl\SCHTASK_RUN.txt
+          if ($LASTEXITCODE -ne 0) { throw "schtasks run failed: $LASTEXITCODE" }
+          $fl64=$null
+          for ($i=0; $i -lt 120; $i++) {
+            Start-Sleep -Seconds 5
+            $hits=@(Get-ChildItem 'C:\Program Files\Image-Line','C:\Program Files (x86)\Image-Line' -Filter FL64.exe -Recurse -File -ErrorAction SilentlyContinue)
+            if ($hits.Count -gt 0) {
+              $fl64=$hits | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+              break
+            }
+          }
+          & schtasks.exe /Query /TN $task /V /FO LIST 2>&1 | Tee-Object -FilePath _fl\SCHTASK_FINAL.txt
+          if ($null -eq $fl64) { throw 'FL64.exe not found after 10 minutes of SYSTEM silent install' }
+          Start-Sleep -Seconds 15
           $root=$fl64.DirectoryName
           "root=$root`nfl64=$($fl64.FullName)`nfl64_bytes=$($fl64.Length)`nfl64_sha256=$((Get-FileHash -Algorithm SHA256 $fl64.FullName).Hash.ToLowerInvariant())" | Set-Content -Encoding ascii _fl\INSTALLED_IDENTITY.txt
           $root | Set-Content -Encoding ascii _fl\INSTALL_ROOT.txt
@@ -54,6 +65,7 @@ jobs:
             "$h  $($_.FullName.Substring($root.Length + 1).Replace('\','/'))"
           } | Set-Content -Encoding ascii _fl\TREE_SHA256SUMS.txt
           (Get-ChildItem -Recurse -File $root | Measure-Object -Property Length -Sum) | Format-List * | Out-String | Set-Content _fl\TREE_SIZE.txt
+          & schtasks.exe /Delete /TN $task /F 2>&1 | Out-File -Append _fl\SCHTASK_FINAL.txt
 
       - name: Capture Image-Line registry and package installed tree
         shell: powershell
@@ -88,6 +100,7 @@ jobs:
           Remove-Item $tar -Force
 
       - name: Upload install metadata
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: flp4-fl-installed-meta
@@ -97,7 +110,7 @@ jobs:
             _fl/*.log
           compression-level: 1
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload part 00
         uses: actions/upload-artifact@v4
