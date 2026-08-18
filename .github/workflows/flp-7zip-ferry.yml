@@ -1,3 +1,4 @@
+# trigger: 2026-08-18 local-runtime
 name: FLP 7-Zip Ferry
 
 on:
@@ -28,7 +29,7 @@ jobs:
           test "$actual" = "$expected"
           tar -xf _tool/7z2602-linux-x64.tar.xz -C _tool
           test -x _tool/7zz
-          _tool/7zz i | head -20 > _tool/IDENTITY.txt || true
+          _tool/7zz i > _tool/IDENTITY.txt
           sha256sum _tool/7z2602-linux-x64.tar.xz > _tool/SHA256SUMS.txt
 
       - name: Upload 7-Zip
