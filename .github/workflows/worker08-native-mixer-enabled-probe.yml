@@ -1,0 +1,210 @@
+name: Worker08 Native Mixer Enabled Runtime Probe
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.worker08-mixer-enabled-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare evidence directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\worker08-enabled" | Out-Null
+
+      - name: Download and install current official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\worker08-enabled"
+          $installer="$out\flstudio-latest.exe"
+          curl.exe -L --fail --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 -A "MEGA-DAN-FLP-Builder/1.0" -o "$installer" "https://support.image-line.com/redirect/flstudio_win_installer"
+          $bytes=(Get-Item $installer).Length
+          if($bytes -lt 100MB){throw "installer too small: $bytes"}
+          $head=[System.IO.File]::ReadAllBytes($installer)[0..1]
+          if($head[0] -ne 0x4d -or $head[1] -ne 0x5a){throw 'installer missing MZ'}
+          $ih=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          $p=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          $fl='C:\Program Files\Image-Line\FL Studio 2026\FL64.exe'
+          for($i=0;$i -lt 30 -and -not(Test-Path $fl);$i++){Start-Sleep 2}
+          if(-not(Test-Path $fl)){throw "FL64.exe absent after installer exit $($p.ExitCode)"}
+          $fh=(Get-FileHash -Algorithm SHA256 $fl).Hash.ToLowerInvariant()
+          "installer_bytes=$bytes`ninstaller_sha256=$ih`ninstaller_exit_code=$($p.ExitCode)`nfl64_path=$fl`nfl64_sha256=$fh" | Set-Content -Encoding UTF8 "$out\install.txt"
+          "FL64_PATH=$fl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item -Force $installer
+
+      - name: Build exact one-bit mixer enabled candidate from installed stock Basic
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\worker08-enabled"
+          $source='C:\Program Files\Image-Line\FL Studio 2026\Data\Templates\Minimal\Basic\Basic.flp'
+          if(-not(Test-Path $source)){throw 'stock Basic.flp missing'}
+          $env:W08_SOURCE=$source
+          $env:W08_CANDIDATE="$out\Basic.insert1_enabled_false.flp"
+          @'
+          import hashlib,json,os,re,struct
+          from pathlib import Path
+
+          EXPECTED_SOURCE='c8a7a05cf39dcf8489a9cd67e31024602fe0dd910fcb941d52ca27ddb35c907f'
+
+          def varint(buf,pos):
+              v=0
+              for i in range(5):
+                  b=buf[pos];pos+=1;v|=(b&127)<<(7*i)
+                  if not b&128:return v,pos
+              raise ValueError('varint too long')
+
+          def parse(data):
+              if data[:4]!=b'FLhd': raise ValueError('FLhd missing')
+              hs=struct.unpack_from('<I',data,4)[0]; he=8+hs
+              if data[he:he+4]!=b'FLdt': raise ValueError('FLdt missing')
+              ds=struct.unpack_from('<I',data,he+4)[0]
+              cur=he+8; end=cur+ds; ev=[]; major=None
+              while cur<end:
+                  start=cur; eid=data[cur];cur+=1
+                  if eid==0xac: n=4 if major is None or major<25 else 3
+                  elif eid<64:n=1
+                  elif eid<128:n=2
+                  elif eid<192:n=4
+                  else:n,cur=varint(data,cur)
+                  ps=cur; pe=cur+n
+                  if pe>end: raise ValueError('event overrun')
+                  payload=data[ps:pe]
+                  ev.append((eid,start,ps,pe,payload))
+                  if eid==0xc7:
+                      m=re.match(rb'\s*(\d+)',payload.rstrip(b'\0'))
+                      if m: major=int(m.group(1))
+                  cur=pe
+              return he,ds,ev
+
+          source=Path(os.environ['W08_SOURCE'])
+          candidate=Path(os.environ['W08_CANDIDATE'])
+          raw=bytearray(source.read_bytes())
+          sh=hashlib.sha256(raw).hexdigest()
+          if sh!=EXPECTED_SOURCE: raise SystemExit(f'stock Basic identity changed: {sh}')
+          he,ds,ev=parse(raw)
+          flags=[(i,e) for i,e in enumerate(ev) if e[0]==236]
+          if len(flags)!=18: raise SystemExit(f'expected 18 mixer flag groups, got {len(flags)}')
+          group_index=1
+          event_index,e=flags[group_index]
+          eid,start,ps,pe,payload=e
+          if len(payload)<5: raise SystemExit('flags payload too short')
+          width=min(4,len(payload)-4)
+          before=int.from_bytes(payload[4:4+width],'little')
+          if not(before & 8): raise SystemExit(f'insert 1 was already disabled: flags=0x{before:x}')
+          after=before & ~8
+          raw[ps+4:ps+4+width]=after.to_bytes(width,'little')
+          candidate.write_bytes(raw)
+          ch=hashlib.sha256(raw).hexdigest()
+          # Reparse and verify exactly one byte changed and bit state is false.
+          reread=candidate.read_bytes(); _,_,ev2=parse(reread)
+          flags2=[(i,e) for i,e in enumerate(ev2) if e[0]==236]
+          _,e2=flags2[group_index]; payload2=e2[4]
+          after_read=int.from_bytes(payload2[4:4+width],'little')
+          original=source.read_bytes()
+          diffs=[i for i,(a,b) in enumerate(zip(original,reread)) if a!=b]
+          info={
+            'source_sha256':sh,'source_bytes':len(original),'source_events':len(ev),
+            'candidate_sha256':ch,'candidate_bytes':len(reread),'candidate_events':len(ev2),
+            'mixer_group_index':group_index,'flags_event_index':event_index,
+            'flags_raw_before':before,'flags_raw_after':after_read,
+            'enabled_before':bool(before&8),'enabled_after':bool(after_read&8),
+            'changed_byte_offsets':diffs,'changed_byte_count':len(diffs),
+            'single_byte_only':len(diffs)==1,
+          }
+          Path(os.path.join(os.environ['RUNNER_TEMP'],'worker08-enabled','candidate-build.json')).write_text(json.dumps(info,indent=2)+'\n')
+          if after_read!=after or after_read&8: raise SystemExit('enabled bit did not clear')
+          if len(diffs)!=1: raise SystemExit(f'expected exactly one changed byte, got {len(diffs)}')
+          '@ | Set-Content -Encoding UTF8 "$out\build_enabled_candidate.py"
+          python "$out\build_enabled_candidate.py"
+          "SOURCE_FLP=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_FLP=$env:W08_CANDIDATE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Open stock control and disabled candidate in untouched FL64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @'
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          public static class W08Win {
+            public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+            [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+          }
+          '@
+          $out="$env:RUNNER_TEMP\worker08-enabled"; $fl=$env:FL64_PATH
+          function Shot([string]$p){
+            try{$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;$bm=New-Object System.Drawing.Bitmap $b.Width,$b.Height;$g=[System.Drawing.Graphics]::FromImage($bm);$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);$bm.Save($p,[System.Drawing.Imaging.ImageFormat]::Png);$g.Dispose();$bm.Dispose()}catch{$_|Out-String|Set-Content ($p+'.error.txt')}
+          }
+          function Windows([int]$ProcessId){
+            $rows=New-Object System.Collections.Generic.List[object]
+            $cb=[W08Win+EnumWindowsProc]{param($h,$l);$wpid=0;[void][W08Win]::GetWindowThreadProcessId($h,[ref]$wpid);if($wpid -eq $ProcessId -and [W08Win]::IsWindowVisible($h)){$sb=New-Object System.Text.StringBuilder 1024;[void][W08Win]::GetWindowText($h,$sb,$sb.Capacity);$rows.Add([pscustomobject]@{handle=('0x{0:x}' -f $h.ToInt64());title=$sb.ToString()})};return $true};[void][W08Win]::EnumWindows($cb,[IntPtr]::Zero);return @($rows)
+          }
+          function Probe([string]$label,[string]$project){
+            Get-Process FL64 -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;Start-Sleep 2
+            $before=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant()
+            $p=Start-Process -FilePath $fl -ArgumentList ('"'+$project+'"') -PassThru;Start-Sleep 18;$p.Refresh();Shot "$out\$label-before-enter.png"
+            $w=New-Object -ComObject WScript.Shell;[void]$w.AppActivate($p.Id);Start-Sleep 1;[System.Windows.Forms.SendKeys]::SendWait('{ENTER}');Start-Sleep 5
+            [void]$w.AppActivate($p.Id);[System.Windows.Forms.SendKeys]::SendWait('{F9}');Start-Sleep 4;$p.Refresh();Shot "$out\$label-mixer.png"
+            $wins=Windows $p.Id
+            $mods=@();try{$mods=Get-Process -Id $p.Id -Module|Select ModuleName,FileName,FileVersion}catch{}
+            $after=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant()
+            $rec=[ordered]@{label=$label;pid=$p.Id;title=$p.MainWindowTitle;responding=$p.Responding;exited=$p.HasExited;sha256_before=$before;sha256_after=$after;unchanged=($before -eq $after);windows=$wins;modules=$mods}
+            $rec|ConvertTo-Json -Depth 7|Set-Content -Encoding UTF8 "$out\$label-runtime.json"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue;Start-Sleep 3
+            return $rec
+          }
+          cmd /c "reg query HKCU\Software\Image-Line /s" *> "$out\registry-before.txt"
+          $control=Probe 'control' $env:SOURCE_FLP
+          $candidate=Probe 'candidate' $env:CANDIDATE_FLP
+          cmd /c "reg query HKCU\Software\Image-Line /s" *> "$out\registry-after.txt"
+          [ordered]@{control=$control;candidate=$candidate}|ConvertTo-Json -Depth 8|Set-Content -Encoding UTF8 "$out\runtime-summary.json"
+          if(-not $control.responding -or -not $candidate.responding){throw 'FL did not remain responsive'}
+          if(-not $control.unchanged -or -not $candidate.unchanged){throw 'project bytes changed on open'}
+
+      - name: Produce verdict and compact evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\worker08-enabled"
+          $b=Get-Content "$out\candidate-build.json" -Raw|ConvertFrom-Json
+          $r=Get-Content "$out\runtime-summary.json" -Raw|ConvertFrom-Json
+          $flHash=(Get-FileHash -Algorithm SHA256 $env:FL64_PATH).Hash.ToLowerInvariant()
+          $v=[ordered]@{
+            schema='worker08.native-mixer-enabled-runtime.v1';passed=([bool]$b.single_byte_only -and -not [bool]$b.enabled_after -and [bool]$r.control.responding -and [bool]$r.candidate.responding -and [bool]$r.control.unchanged -and [bool]$r.candidate.unchanged);
+            source_sha256=$b.source_sha256;candidate_sha256=$b.candidate_sha256;changed_byte_offsets=$b.changed_byte_offsets;
+            mixer_group_index=$b.mixer_group_index;flags_event_index=$b.flags_event_index;flags_raw_before=$b.flags_raw_before;flags_raw_after=$b.flags_raw_after;enabled_before=$b.enabled_before;enabled_after=$b.enabled_after;
+            fl64_sha256=$flHash;control_responding=$r.control.responding;candidate_responding=$r.candidate.responding;candidate_unchanged=$r.candidate.unchanged;native_windows=$true;untouched_official_fl64=$true
+          }
+          $v|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 "$out\verdict.json"
+          if(-not $v.passed){throw 'runtime verdict failed'}
+
+      - name: Upload compact evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker08-native-mixer-enabled-runtime
+          path: ${{ runner.temp }}/worker08-enabled
+          compression-level: 6
+          retention-days: 2
+          if-no-files-found: error
