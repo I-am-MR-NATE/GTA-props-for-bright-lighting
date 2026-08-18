@@ -1,0 +1,174 @@
+name: Worker01 Native Mixer Visible Mute Witness
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.worker01-mixer-visible-mute-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  witness:
+    runs-on: windows-2025
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare evidence directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\worker01-mute" | Out-Null
+
+      - name: Download and install official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\worker01-mute"
+          $installer="$out\flstudio-latest.exe"
+          curl.exe -L --fail --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 -A "MEGA-DAN-FLP-Builder/1.0" -o "$installer" "https://support.image-line.com/redirect/flstudio_win_installer"
+          $bytes=(Get-Item $installer).Length
+          if($bytes -lt 100MB){throw "installer too small: $bytes"}
+          $ih=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          $p=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          $fl='C:\Program Files\Image-Line\FL Studio 2026\FL64.exe'
+          for($i=0;$i -lt 30 -and -not(Test-Path $fl);$i++){Start-Sleep 2}
+          if(-not(Test-Path $fl)){throw "FL64.exe absent after installer exit $($p.ExitCode)"}
+          $fh=(Get-FileHash -Algorithm SHA256 $fl).Hash.ToLowerInvariant()
+          "installer_bytes=$bytes`ninstaller_sha256=$ih`ninstaller_exit_code=$($p.ExitCode)`nfl64_sha256=$fh" | Set-Content -Encoding UTF8 "$out\install.txt"
+          "FL64_PATH=$fl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item -Force $installer
+
+      - name: Prepare stock control copy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\worker01-mute"
+          $source='C:\Program Files\Image-Line\FL Studio 2026\Data\Templates\Minimal\Basic\Basic.flp'
+          if(-not(Test-Path $source)){throw 'stock Basic.flp missing'}
+          $expected='c8a7a05cf39dcf8489a9cd67e31024602fe0dd910fcb941d52ca27ddb35c907f'
+          $h=(Get-FileHash -Algorithm SHA256 $source).Hash.ToLowerInvariant()
+          if($h -ne $expected){throw "stock Basic identity changed: $h"}
+          $candidate="$out\Basic.ui_mute_toggle.flp"
+          Copy-Item -Force $source $candidate
+          "SOURCE_FLP=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_FLP=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Toggle visible Insert 1 mute switch in FL and save
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class W01Mouse {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+          }
+          '@
+          $out="$env:RUNNER_TEMP\worker01-mute"; $fl=$env:FL64_PATH; $project=$env:CANDIDATE_FLP
+          function Shot([string]$p){
+            $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bm=New-Object System.Drawing.Bitmap $b.Width,$b.Height
+            $g=[System.Drawing.Graphics]::FromImage($bm)
+            $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size)
+            $bm.Save($p,[System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose();$bm.Dispose()
+          }
+          function Hash([string]$p){(Get-FileHash -Algorithm SHA256 $p).Hash.ToLowerInvariant()}
+          $before=Hash $project
+          $p=Start-Process -FilePath $fl -ArgumentList ('"'+$project+'"') -PassThru
+          Start-Sleep 18
+          $w=New-Object -ComObject WScript.Shell
+          [void]$w.AppActivate($p.Id); Start-Sleep 1
+          [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep 5
+          [void]$w.AppActivate($p.Id); [System.Windows.Forms.SendKeys]::SendWait('{F9}'); Start-Sleep 4
+          Shot "$out\before-toggle.png"
+          $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          # Previous successful native run is 1024x768 and places Insert 1's mixer mute LED at ~516,351.
+          # Scale the observed point if the hosted desktop dimensions differ.
+          $x=[int][Math]::Round($bounds.Width * 516.0 / 1024.0)
+          $y=[int][Math]::Round($bounds.Height * 351.0 / 768.0)
+          $probe=New-Object System.Drawing.Bitmap "$out\before-toggle.png"
+          $px=$probe.GetPixel($x,$y); $probe.Dispose()
+          [ordered]@{screen_width=$bounds.Width;screen_height=$bounds.Height;click_x=$x;click_y=$y;preclick_r=$px.R;preclick_g=$px.G;preclick_b=$px.B}|ConvertTo-Json|Set-Content -Encoding UTF8 "$out\click.json"
+          if($px.G -lt 80){throw "target pixel is not plausibly the green Insert 1 mute LED: $($px.R),$($px.G),$($px.B) at $x,$y"}
+          [void][W01Mouse]::SetCursorPos($x,$y); Start-Sleep 1
+          [W01Mouse]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero); Start-Sleep 0.1
+          [W01Mouse]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero); Start-Sleep 4
+          Shot "$out\after-toggle-before-save.png"
+          [void]$w.AppActivate($p.Id); [System.Windows.Forms.SendKeys]::SendWait('^s'); Start-Sleep 8
+          Shot "$out\after-save.png"
+          # Trial builds may show a save/trial acknowledgement; accept one foreground dialog if present.
+          [void]$w.AppActivate($p.Id); [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep 4
+          $after=Hash $project
+          [ordered]@{sha256_before=$before;sha256_after=$after;bytes=(Get-Item $project).Length;process_responding=$p.Responding;main_window_title=$p.MainWindowTitle}|ConvertTo-Json|Set-Content -Encoding UTF8 "$out\runtime.json"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep 3
+          if($before -eq $after){throw 'FL UI toggle + save left project bytes unchanged; no host-authored witness produced'}
+
+      - name: Decode exact host-authored byte/event delta
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\worker01-mute"
+          $env:W01_SOURCE=$env:SOURCE_FLP
+          $env:W01_CANDIDATE=$env:CANDIDATE_FLP
+          @'
+          import hashlib,json,os,re,struct
+          from pathlib import Path
+          def varint(buf,pos):
+              v=0
+              for i in range(5):
+                  b=buf[pos];pos+=1;v|=(b&127)<<(7*i)
+                  if not b&128:return v,pos
+              raise ValueError('varint too long')
+          def parse(data):
+              hs=struct.unpack_from('<I',data,4)[0]; he=8+hs
+              ds=struct.unpack_from('<I',data,he+4)[0];cur=he+8;end=cur+ds;ev=[];major=None
+              while cur<end:
+                  start=cur;eid=data[cur];cur+=1
+                  if eid==0xac:n=4 if major is None or major<25 else 3
+                  elif eid<64:n=1
+                  elif eid<128:n=2
+                  elif eid<192:n=4
+                  else:n,cur=varint(data,cur)
+                  ps=cur;pe=cur+n;payload=data[ps:pe];ev.append((eid,start,ps,pe,payload));cur=pe
+                  if eid==0xc7:
+                      m=re.match(rb'\s*(\d+)',payload.rstrip(b'\0'))
+                      if m: major=int(m.group(1))
+              return ev
+          s=Path(os.environ['W01_SOURCE']).read_bytes(); c=Path(os.environ['W01_CANDIDATE']).read_bytes()
+          se=parse(s);ce=parse(c)
+          sf=[(i,e) for i,e in enumerate(se) if e[0]==236]; cf=[(i,e) for i,e in enumerate(ce) if e[0]==236]
+          def flags(row):
+              i,e=row; p=e[4]; w=min(4,len(p)-4); return {'event_index':i,'raw':int.from_bytes(p[4:4+w],'little'),'payload_hex':p.hex()}
+          result={
+            'source_sha256':hashlib.sha256(s).hexdigest(),'candidate_sha256':hashlib.sha256(c).hexdigest(),
+            'source_bytes':len(s),'candidate_bytes':len(c),'source_events':len(se),'candidate_events':len(ce),
+            'source_insert1_flags':flags(sf[1]),'candidate_insert1_flags':flags(cf[1]) if len(cf)>1 else None,
+            'all_source_flags':[flags(x) for x in sf],'all_candidate_flags':[flags(x) for x in cf],
+          }
+          # Whole-file save canonicalisation is allowed; the crucial witness is the exact event-236 delta for Insert 1.
+          if result['candidate_insert1_flags'] is not None:
+              result['insert1_flags_xor']=result['source_insert1_flags']['raw'] ^ result['candidate_insert1_flags']['raw']
+          Path(os.path.join(os.environ['RUNNER_TEMP'],'worker01-mute','host-save-delta.json')).write_text(json.dumps(result,indent=2)+'\n')
+          print(json.dumps(result,indent=2))
+          '@ | Set-Content -Encoding UTF8 "$out\decode.py"
+          python "$out\decode.py"
+
+      - name: Upload witness
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker01-native-mixer-visible-mute-witness
+          path: ${{ runner.temp }}/worker01-mute
+          compression-level: 6
+          retention-days: 2
+          if-no-files-found: error
