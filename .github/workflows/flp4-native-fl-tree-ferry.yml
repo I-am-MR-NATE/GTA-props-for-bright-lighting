@@ -1,0 +1,117 @@
+name: FLP4 Native FL Tree Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp4-native-fl-tree-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Install exact FL tree and package it
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $ProgressPreference='SilentlyContinue'
+          New-Item -ItemType Directory -Force -Path _fl | Out-Null
+          $installer=(Resolve-Path _fl).Path + '\flstudio_win64_26.1.4.5589.exe'
+          $url='https://support.image-line.com/redirect/flstudio_win_installer'
+          $client=New-Object System.Net.WebClient
+          $client.Headers.Add('User-Agent','MEGA-DAN-FLP-Builder/1.0')
+          $client.DownloadFile($url,$installer)
+          $bytes=(Get-Item $installer).Length
+          $sha=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($bytes -ne 1107195744 -or $sha -ne '365e4210cad9e7fa8d1f0c1941fb2d629e45cc56232d1403bd478f941ebf0ee3') { throw 'installer identity mismatch' }
+
+          $task='FLP4NativeFLTree'
+          $taskCommand='"' + $installer + '" /S /ALLUSERS=1'
+          & schtasks.exe /Create /TN $task /TR $taskCommand /SC ONCE /ST 23:59 /RU SYSTEM /RL HIGHEST /F | Out-File _fl\SCHTASK.txt
+          if ($LASTEXITCODE -ne 0) { throw 'task create failed' }
+          & schtasks.exe /Run /TN $task | Out-File -Append _fl\SCHTASK.txt
+          if ($LASTEXITCODE -ne 0) { throw 'task run failed' }
+          $fl64=$null
+          for ($i=0; $i -lt 120; $i++) {
+            Start-Sleep -Seconds 5
+            $hits=@(Get-ChildItem 'C:\Program Files\Image-Line','C:\Program Files (x86)\Image-Line' -Filter FL64.exe -Recurse -File -ErrorAction SilentlyContinue)
+            if ($hits.Count -gt 0) { $fl64=$hits | Sort-Object LastWriteTime -Descending | Select-Object -First 1; break }
+          }
+          if ($null -eq $fl64) { throw 'FL64.exe not found' }
+          Start-Sleep -Seconds 45
+          & schtasks.exe /Query /TN $task /V /FO LIST 2>&1 | Out-File -Append _fl\SCHTASK.txt
+          & schtasks.exe /Delete /TN $task /F 2>&1 | Out-File -Append _fl\SCHTASK.txt
+
+          $root=$fl64.DirectoryName
+          $files=@(Get-ChildItem -Recurse -File $root)
+          $sum=($files | Measure-Object Length -Sum).Sum
+          $flsha=(Get-FileHash -Algorithm SHA256 $fl64.FullName).Hash.ToLowerInvariant()
+          "root=$root`nfl64=$($fl64.FullName)`nfl64_bytes=$($fl64.Length)`nfl64_sha256=$flsha`ntree_files=$($files.Count)`ntree_bytes=$sum" | Set-Content -Encoding ascii _fl\INSTALLED_IDENTITY.txt
+          $root | Set-Content -Encoding ascii _fl\INSTALL_ROOT.txt
+          $files | Sort-Object FullName | ForEach-Object {
+            $h=(Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$h  $($_.FullName.Substring($root.Length + 1).Replace('\','/'))"
+          } | Set-Content -Encoding ascii _fl\TREE_SHA256SUMS.txt
+
+          $parent=Split-Path $root -Parent
+          $name=Split-Path $root -Leaf
+          tar.exe -cf _fl\flstudio-installed.tar -C $parent $name
+          if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
+          $tar=(Resolve-Path _fl\flstudio-installed.tar).Path
+          $tarsha=(Get-FileHash -Algorithm SHA256 $tar).Hash.ToLowerInvariant()
+          $chunk=240MB
+          $input=[IO.File]::OpenRead($tar)
+          try {
+            $buf=New-Object byte[] $chunk
+            $index=0
+            while (($read=$input.Read($buf,0,$buf.Length)) -gt 0) {
+              $path=('_fl\flstudio-installed.part.{0:D2}.bin' -f $index)
+              $out=[IO.File]::Create($path)
+              try { $out.Write($buf,0,$read) } finally { $out.Dispose() }
+              $index++
+            }
+          } finally { $input.Dispose() }
+          Get-ChildItem _fl\flstudio-installed.part.*.bin | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant())  $($_.Name)  $($_.Length)"
+          } | Set-Content -Encoding ascii _fl\PART_SHA256SUMS.txt
+          "tar_bytes=$((Get-Item $tar).Length)`ntar_sha256=$tarsha`npart_count=$((Get-ChildItem _fl\flstudio-installed.part.*.bin).Count)" | Set-Content -Encoding ascii _fl\PACKAGE_RECEIPT.txt
+          Remove-Item $tar -Force
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp4-fl-tree-meta
+          path: |
+            _fl/*.txt
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-00, path: _fl/flstudio-installed.part.00.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-01, path: _fl/flstudio-installed.part.01.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-02, path: _fl/flstudio-installed.part.02.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-03, path: _fl/flstudio-installed.part.03.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-04, path: _fl/flstudio-installed.part.04.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-05, path: _fl/flstudio-installed.part.05.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-06, path: _fl/flstudio-installed.part.06.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-07, path: _fl/flstudio-installed.part.07.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-08, path: _fl/flstudio-installed.part.08.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-09, path: _fl/flstudio-installed.part.09.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-10, path: _fl/flstudio-installed.part.10.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
+      - uses: actions/upload-artifact@v4
+        with: {name: flp4-fl-tree-part-11, path: _fl/flstudio-installed.part.11.bin, compression-level: 0, retention-days: 1, if-no-files-found: ignore}
