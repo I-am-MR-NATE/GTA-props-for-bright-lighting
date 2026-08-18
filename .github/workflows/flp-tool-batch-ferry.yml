@@ -1,0 +1,114 @@
+name: FLP Tool Batch Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-tool-batch-ferry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  small-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Acquire pluginval flpdiff NSISExtractor and Rust tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _small/pluginval _small/flpdiff _small/nsisextract _small/undelphi _small/nsis-rs
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            'https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Linux.zip' \
+            -o _small/pluginval/pluginval_Linux_v1.0.4.zip
+          curl --fail --location --retry 5 --retry-all-errors \
+            'https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip' \
+            -o _small/pluginval/pluginval_Windows_v1.0.4.zip
+
+          final_url="$(curl --fail --location --retry 5 --retry-all-errors --silent --show-error \
+            --output _small/flpdiff/flpdiff-linux-x64 \
+            --write-out '%{url_effective}' \
+            'https://github.com/dawhubapp/flpdiff/releases/latest/download/flpdiff-linux-x64')"
+          chmod +x _small/flpdiff/flpdiff-linux-x64
+          printf '%s\n' "$final_url" > _small/flpdiff/EFFECTIVE_URL.txt
+          _small/flpdiff/flpdiff-linux-x64 --help > _small/flpdiff/HELP.txt 2>&1 || true
+
+          git clone --depth 1 https://github.com/KokerZhou/NSISExtractor.git _src_nsisextract
+          nsis_sha="$(git -C _src_nsisextract rev-parse HEAD)"
+          python3 -m pip wheel --wheel-dir _small/nsisextract/wheels ./_src_nsisextract
+          printf '%s\n' "$nsis_sha" > _small/nsisextract/GIT_SHA.txt
+
+          git clone https://github.com/BinFlip/undelphi.git _src_undelphi
+          git -C _src_undelphi checkout dc12c62ec32f42b4ae5e9dfe2bb678a762490d53
+          cargo build --manifest-path _src_undelphi/Cargo.toml --release --example dump
+          cp _src_undelphi/target/release/examples/dump _small/undelphi/undelphi-dump
+          chmod +x _small/undelphi/undelphi-dump
+          printf '%s\n' dc12c62ec32f42b4ae5e9dfe2bb678a762490d53 > _small/undelphi/GIT_SHA.txt
+
+          git clone --depth 1 https://github.com/BinFlip/nsis-rs.git _src_nsisrs
+          nsisrs_sha="$(git -C _src_nsisrs rev-parse HEAD)"
+          cargo build --manifest-path _src_nsisrs/Cargo.toml --release --example dump
+          cp _src_nsisrs/target/release/examples/dump _small/nsis-rs/nsis-rs-dump
+          chmod +x _small/nsis-rs/nsis-rs-dump
+          printf '%s\n' "$nsisrs_sha" > _small/nsis-rs/GIT_SHA.txt
+
+          find _small -type f -print0 | sort -z | xargs -0 sha256sum > _small/SHA256SUMS.txt
+
+      - name: Upload small tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-public-small-tools
+          path: _small
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+
+  ghidra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download verify and split Ghidra 12.1.2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _ghidra/meta _ghidra/parts
+          url='https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip'
+          expected='b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d'
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 1800 \
+            "$url" -o _ghidra/ghidra.zip
+          actual="$(sha256sum _ghidra/ghidra.zip | awk '{print $1}')"
+          test "$actual" = "$expected"
+          bytes="$(stat -c %s _ghidra/ghidra.zip)"
+          printf 'url=%s\nbytes=%s\nsha256=%s\n' "$url" "$bytes" "$actual" > _ghidra/meta/RECEIPT.txt
+          split -b 300M -d -a 2 --additional-suffix=.bin _ghidra/ghidra.zip _ghidra/parts/ghidra.part.
+          find _ghidra/parts -type f -printf '%f %s\n' | sort > _ghidra/meta/PART_BYTES.txt
+          sha256sum _ghidra/parts/* | sort -k2 > _ghidra/meta/PART_SHA256SUMS.txt
+          printf '%s\n' ghidra.part.00.bin ghidra.part.01.bin > _ghidra/meta/PART_ORDER.txt
+
+      - name: Upload Ghidra metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-ghidra-12.1.2-meta
+          path: _ghidra/meta
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload Ghidra part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-ghidra-12.1.2-part-00
+          path: _ghidra/parts/ghidra.part.00.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload Ghidra part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: flp-ghidra-12.1.2-part-01
+          path: _ghidra/parts/ghidra.part.01.bin
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
