@@ -15,23 +15,48 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Acquire exact pinned Ghidra 12.1.2
+      - name: Acquire exact pinned Ghidra 12.1.2 and split for transport
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p _ghidra
+          mkdir -p _ghidra/meta _ghidra/parts
           url='https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip'
           expected='b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d'
-          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 1800 "$url" -o _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip
-          actual="$(sha256sum _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip | awk '{print $1}')"
+          curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 1800 "$url" -o _ghidra/ghidra.zip
+          actual="$(sha256sum _ghidra/ghidra.zip | awk '{print $1}')"
           test "$actual" = "$expected"
-          unzip -l _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip | head -100 > _ghidra/ZIP_HEAD.txt
-          printf 'source=%s\nexpected_sha256=%s\nactual_sha256=%s\nrun_id=%s\nhead=%s\n' "$url" "$expected" "$actual" "$GITHUB_RUN_ID" "$GITHUB_SHA" > _ghidra/RECEIPT.txt
-          sha256sum _ghidra/ghidra_12.1.2_PUBLIC_20260605.zip > _ghidra/SHA256SUMS.txt
+          bytes="$(stat -c %s _ghidra/ghidra.zip)"
+          test "$bytes" -eq 572803866
+          split -b 240M -d -a 2 _ghidra/ghidra.zip _ghidra/parts/ghidra.part.
+          find _ghidra/parts -type f -printf '%f %s\n' | sort > _ghidra/meta/PART_SIZES.txt
+          sha256sum _ghidra/parts/* | sed 's#_ghidra/parts/##' > _ghidra/meta/PART_SHA256SUMS.txt
+          printf '%s  ghidra_12.1.2_PUBLIC_20260605.zip\n' "$actual" > _ghidra/meta/WHOLE_SHA256SUMS.txt
+          printf 'source=%s\nbytes=%s\nsha256=%s\nrun_id=%s\nhead=%s\n' "$url" "$bytes" "$actual" "$GITHUB_RUN_ID" "$GITHUB_SHA" > _ghidra/meta/RECEIPT.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: flp4-ghidra-12.1.2
-          path: _ghidra
+          name: flp4-ghidra-meta
+          path: _ghidra/meta
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-ghidra-part-00
+          path: _ghidra/parts/ghidra.part.00
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-ghidra-part-01
+          path: _ghidra/parts/ghidra.part.01
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flp4-ghidra-part-02
+          path: _ghidra/parts/ghidra.part.02
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
