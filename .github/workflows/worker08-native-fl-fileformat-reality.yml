@@ -1,0 +1,251 @@
+name: Worker08 Native FL FileFormat Reality
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-fl-reality:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Run native FL Studio file_format differential
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'worker08-native-fl-reality'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $obsDir = Join-Path $work 'observation'
+          New-Item -ItemType Directory -Force -Path $obsDir | Out-Null
+
+          function Get-Sha256([string]$Path) {
+            (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
+          }
+
+          $installer = Join-Path $work 'flstudio-latest.exe'
+          $effective = & curl.exe --fail --location --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 --user-agent 'MEGA-DAN-Worker08/1.0' --silent --show-error --output $installer --write-out '%{url_effective}' 'https://support.image-line.com/redirect/flstudio_win_installer'
+          if ($LASTEXITCODE -ne 0) { throw "curl failed: $LASTEXITCODE" }
+          $installerBytes = (Get-Item $installer).Length
+          if ($installerBytes -lt 104857600) { throw "installer implausibly small: $installerBytes" }
+          $head = [IO.File]::ReadAllBytes($installer)[0..1]
+          if ($head[0] -ne 0x4d -or $head[1] -ne 0x5a) { throw 'installer missing MZ' }
+          $installerSha = Get-Sha256 $installer
+
+          $installProc = Start-Process -FilePath $installer -ArgumentList '/S','/ALLUSERS=1' -Wait -PassThru
+          $installExit = $installProc.ExitCode
+          Start-Sleep -Seconds 3
+          $fl = Get-ChildItem 'C:\Program Files\Image-Line' -Recurse -Filter FL64.exe -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $fl) { throw "FL64.exe not found after installer exit $installExit" }
+          $flPath = $fl.FullName
+          $flSha = Get-Sha256 $flPath
+          $flVersion = $fl.VersionInfo.FileVersion
+
+          $basic = Get-ChildItem (Split-Path $flPath -Parent) -Recurse -Filter Basic.flp -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Templates' } | Select-Object -First 1
+          if (-not $basic) { throw 'stock Basic.flp not found' }
+          $control = Join-Path $work 'control_file_format0.flp'
+          $mutant = Join-Path $work 'mutant_file_format1.flp'
+          Copy-Item $basic.FullName $control -Force
+          $b = [IO.File]::ReadAllBytes($control)
+          if ($b.Length -lt 14) { throw 'Basic.flp too small' }
+          $magic = [Text.Encoding]::ASCII.GetString($b,0,4)
+          $chunkLen = [BitConverter]::ToUInt32($b,4)
+          $originalFormat = [BitConverter]::ToUInt16($b,8)
+          if ($magic -ne 'FLhd' -or $chunkLen -ne 6 -or $originalFormat -ne 0) { throw "unexpected FLhd header magic=$magic len=$chunkLen format=$originalFormat" }
+          $m = [byte[]]$b.Clone()
+          $m[8] = 1
+          $m[9] = 0
+          [IO.File]::WriteAllBytes($mutant,$m)
+          $diffs = for($i=0;$i -lt $b.Length;$i++){ if($b[$i] -ne $m[$i]){ $i } }
+          if (($diffs | Measure-Object).Count -ne 1 -or $diffs[0] -ne 8) { throw "unexpected mutation positions: $($diffs -join ',')" }
+
+          $controlSha = Get-Sha256 $control
+          $mutantSha = Get-Sha256 $mutant
+
+          $procZip = Join-Path $work 'ProcessMonitor.zip'
+          try {
+            & curl.exe --fail --location --retry 4 --retry-all-errors --connect-timeout 20 --max-time 600 --silent --show-error --output $procZip 'https://download.sysinternals.com/files/ProcessMonitor.zip'
+            if ($LASTEXITCODE -ne 0) { throw "procmon download failed: $LASTEXITCODE" }
+            $procDir = Join-Path $work 'procmon'
+            Expand-Archive -Path $procZip -DestinationPath $procDir -Force
+            $procmon = Get-ChildItem $procDir -Filter Procmon64.exe -Recurse | Select-Object -First 1
+            if (-not $procmon) { throw 'Procmon64.exe not found' }
+            $procmonPath = $procmon.FullName
+            $procmonSha = Get-Sha256 $procmonPath
+            $procmonAvailable = $true
+          } catch {
+            $procmonAvailable = $false
+            $procmonPath = $null
+            $procmonSha = $null
+            $_ | Out-String | Set-Content (Join-Path $obsDir 'procmon_setup_error.txt')
+          }
+
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Text;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          public static class W08Win {
+            public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+            [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc cb, IntPtr lp);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
+            public static string Text(IntPtr h) { var sb=new StringBuilder(4096); GetWindowText(h,sb,sb.Capacity); return sb.ToString(); }
+            public static string ClassName(IntPtr h) { var sb=new StringBuilder(1024); GetClassName(h,sb,sb.Capacity); return sb.ToString(); }
+          }
+          '@
+
+          function Get-FlWindows {
+            $items = New-Object System.Collections.Generic.List[object]
+            [W08Win]::EnumWindows({ param($h,$l)
+              $pid = [uint32]0
+              [void][W08Win]::GetWindowThreadProcessId($h,[ref]$pid)
+              if ($pid -ne 0) {
+                $p = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                if ($p -and $p.ProcessName -eq 'FL64') {
+                  $topText = [W08Win]::Text($h)
+                  $children = New-Object System.Collections.Generic.List[object]
+                  [W08Win]::EnumChildWindows($h,{ param($ch,$cl)
+                    $ct = [W08Win]::Text($ch)
+                    if ($ct) { $children.Add([pscustomobject]@{ text=$ct; class=[W08Win]::ClassName($ch) }) }
+                    return $true
+                  },[IntPtr]::Zero) | Out-Null
+                  $items.Add([pscustomobject]@{ pid=$pid; hwnd=('0x{0:x}' -f $h.ToInt64()); visible=[W08Win]::IsWindowVisible($h); title=$topText; class=[W08Win]::ClassName($h); child_texts=@($children) })
+                }
+              }
+              return $true
+            },[IntPtr]::Zero) | Out-Null
+            return @($items)
+          }
+
+          function Stop-FL {
+            Get-Process -Name FL64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 800
+          }
+
+          function Run-Case([string]$Name,[string]$Project) {
+            Stop-FL
+            $beforeSha = Get-Sha256 $Project
+            $caseDir = Join-Path $obsDir $Name
+            New-Item -ItemType Directory -Force -Path $caseDir | Out-Null
+            $pml = Join-Path $caseDir 'trace.pml'
+            $csv = Join-Path $caseDir 'trace.csv'
+            $procmonStarted = $false
+            if ($procmonAvailable) {
+              try {
+                & $procmonPath /AcceptEula /Quiet /Minimized /BackingFile $pml | Out-Null
+                Start-Sleep -Seconds 2
+                $procmonStarted = $true
+              } catch {
+                $_ | Out-String | Set-Content (Join-Path $caseDir 'procmon_start_error.txt')
+              }
+            }
+
+            $startUtc = [DateTime]::UtcNow.ToString('o')
+            $flp = Start-Process -FilePath $flPath -ArgumentList ('"' + $Project + '"') -PassThru
+            $snapshots = New-Object System.Collections.Generic.List[object]
+            $allTitles = New-Object System.Collections.Generic.HashSet[string]
+            $allChild = New-Object System.Collections.Generic.HashSet[string]
+            for($n=0;$n -lt 32;$n++) {
+              Start-Sleep -Milliseconds 500
+              $wins = Get-FlWindows
+              foreach($w in $wins){
+                if($w.title){ [void]$allTitles.Add($w.title) }
+                foreach($c in $w.child_texts){ if($c.text){ [void]$allChild.Add($c.text) } }
+              }
+              $ps = Get-Process -Name FL64 -ErrorAction SilentlyContinue
+              $snapshots.Add([pscustomobject]@{
+                t_ms = ($n+1)*500
+                process_count = @($ps).Count
+                responding = @($ps | ForEach-Object { $_.Responding })
+                main_titles = @($ps | ForEach-Object { $_.MainWindowTitle })
+                windows = @($wins)
+              })
+            }
+            $mods = @()
+            foreach($p in @(Get-Process -Name FL64 -ErrorAction SilentlyContinue)) {
+              try { $mods += @($p.Modules | ForEach-Object { $_.FileName }) } catch {}
+            }
+            $afterSha = Get-Sha256 $Project
+            $aliveBeforeStop = @(Get-Process -Name FL64 -ErrorAction SilentlyContinue).Count -gt 0
+            Stop-FL
+
+            $procmonSummary = [ordered]@{ available=$procmonAvailable; started=$procmonStarted; converted=$false; fl64_lines=0; project_path_lines=0; registry_lines=0; image_load_lines=0 }
+            if ($procmonStarted) {
+              try { & $procmonPath /Terminate | Out-Null; Start-Sleep -Seconds 2 } catch {}
+              try {
+                & $procmonPath /AcceptEula /OpenLog $pml /SaveAs $csv | Out-Null
+                Start-Sleep -Seconds 2
+                if (Test-Path $csv) {
+                  $procmonSummary.converted = $true
+                  $flLines = @(Select-String -Path $csv -SimpleMatch 'FL64.exe' | ForEach-Object { $_.Line })
+                  $projectName = [IO.Path]::GetFileName($Project)
+                  $projectLines = @($flLines | Where-Object { $_ -like "*$projectName*" })
+                  $registryLines = @($flLines | Where-Object { $_ -match ',"?Reg(Open|Query|Set|Create|Close|Enum|Delete)' })
+                  $imageLines = @($flLines | Where-Object { $_ -match ',"?Load Image' })
+                  $procmonSummary.fl64_lines = $flLines.Count
+                  $procmonSummary.project_path_lines = $projectLines.Count
+                  $procmonSummary.registry_lines = $registryLines.Count
+                  $procmonSummary.image_load_lines = $imageLines.Count
+                  $projectLines | Set-Content (Join-Path $caseDir 'procmon_project_path_lines.txt')
+                  $registryLines | Select-Object -First 500 | Set-Content (Join-Path $caseDir 'procmon_registry_first500.txt')
+                  $imageLines | Select-Object -First 500 | Set-Content (Join-Path $caseDir 'procmon_image_load_first500.txt')
+                  Remove-Item $csv -Force -ErrorAction SilentlyContinue
+                  Remove-Item $pml -Force -ErrorAction SilentlyContinue
+                }
+              } catch {
+                $_ | Out-String | Set-Content (Join-Path $caseDir 'procmon_convert_error.txt')
+              }
+            }
+
+            $result = [ordered]@{
+              name=$Name
+              project=$Project
+              project_sha256_before=$beforeSha
+              project_sha256_after=$afterSha
+              input_unchanged=($beforeSha -eq $afterSha)
+              start_utc=$startUtc
+              initial_pid=$flp.Id
+              process_alive_after_16s=$aliveBeforeStop
+              unique_top_level_titles=@($allTitles)
+              unique_child_texts=@($allChild)
+              loaded_modules=@($mods | Sort-Object -Unique)
+              snapshots=@($snapshots)
+              procmon=$procmonSummary
+            }
+            $result | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $caseDir 'case.json') -Encoding UTF8
+            return $result
+          }
+
+          $case1 = Run-Case 'control_first' $control
+          $case2 = Run-Case 'mutant_file_format1' $mutant
+          $case3 = Run-Case 'control_second' $control
+
+          $receipt = [ordered]@{
+            schema='mega-dan.worker08-native-fl-file-format-reality.v1'
+            generated_utc=[DateTime]::UtcNow.ToString('o')
+            runner_os=(Get-CimInstance Win32_OperatingSystem).Caption
+            runner_version=(Get-CimInstance Win32_OperatingSystem).Version
+            installer=[ordered]@{ effective_url=$effective; bytes=$installerBytes; sha256=$installerSha; exit_code=$installExit }
+            fl64=[ordered]@{ path=$flPath; bytes=(Get-Item $flPath).Length; sha256=$flSha; file_version=$flVersion }
+            stock_basic=[ordered]@{ source_path=$basic.FullName; bytes=(Get-Item $basic.FullName).Length; sha256=(Get-Sha256 $basic.FullName); flhd_magic=$magic; flhd_chunk_length=$chunkLen; original_file_format=$originalFormat }
+            mutation=[ordered]@{ byte_offsets=@($diffs); control_sha256=$controlSha; mutant_sha256=$mutantSha; file_format_control=0; file_format_mutant=1 }
+            procmon=[ordered]@{ available=$procmonAvailable; sha256=$procmonSha }
+            cases=@($case1,$case2,$case3)
+          }
+          $receipt | ConvertTo-Json -Depth 15 | Set-Content (Join-Path $obsDir 'WORKER08_NATIVE_FL_FILE_FORMAT_REALITY_20260818.json') -Encoding UTF8
+          Get-ChildItem $obsDir -Recurse | Select-Object FullName,Length | Format-Table -AutoSize
+
+      - name: Upload runtime observation
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker08-native-fl-fileformat-reality
+          path: ${{ runner.temp }}/worker08-native-fl-reality/observation
+          retention-days: 14
+          if-no-files-found: error
