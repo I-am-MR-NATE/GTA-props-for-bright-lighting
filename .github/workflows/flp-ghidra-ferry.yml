@@ -5,6 +5,11 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/flp-ghidra-ferry.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-ghidra-ferry.yml'
+      - '.flp-ghidra-ferry-trigger'
   workflow_dispatch:
 
 permissions:
