@@ -1,0 +1,151 @@
+name: Worker08 Native InsertFlags Visual Matrix
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.worker08-insertflags-matrix-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: windows-2025
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\w08flags" | Out-Null
+
+      - name: Install current official FL Studio
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\w08flags"; $installer="$out\flstudio-latest.exe"
+          curl.exe -L --fail --retry 6 --retry-all-errors --connect-timeout 30 --max-time 3600 -A "MEGA-DAN-FLP-Builder/1.0" -o "$installer" "https://support.image-line.com/redirect/flstudio_win_installer"
+          if((Get-Item $installer).Length -lt 100MB){throw 'installer too small'}
+          $ih=(Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          $p=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait
+          $fl='C:\Program Files\Image-Line\FL Studio 2026\FL64.exe'
+          for($i=0;$i -lt 30 -and -not(Test-Path $fl);$i++){Start-Sleep 2}
+          if(-not(Test-Path $fl)){throw "FL64 missing after installer exit $($p.ExitCode)"}
+          $fh=(Get-FileHash -Algorithm SHA256 $fl).Hash.ToLowerInvariant()
+          "installer_bytes=$((Get-Item $installer).Length)`ninstaller_sha256=$ih`ninstaller_exit_code=$($p.ExitCode)`nfl64_sha256=$fh" | Set-Content -Encoding UTF8 "$out\install.txt"
+          "FL64_PATH=$fl"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item -Force $installer
+
+      - name: Generate exact one-bit InsertFlags matrix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $out="$env:RUNNER_TEMP\w08flags"
+          $env:W08_SOURCE='C:\Program Files\Image-Line\FL Studio 2026\Data\Templates\Minimal\Basic\Basic.flp'
+          $env:W08_OUT=$out
+          @'
+          import hashlib,json,os,re,struct
+          from pathlib import Path
+          EXPECTED='c8a7a05cf39dcf8489a9cd67e31024602fe0dd910fcb941d52ca27ddb35c907f'
+          FLAGS={
+            'polarity_reversed':1,'swap_left_right':2,'effects_enabled':4,'enabled':8,
+            'disable_threaded_processing':16,'dock_middle':64,'dock_right':128,
+            'separator_shown':1024,'locked':2048,'solo':4096,'audio_track':32768,
+          }
+          def vi(b,p):
+            v=0
+            for i in range(5):
+              x=b[p];p+=1;v|=(x&127)<<(7*i)
+              if not x&128:return v,p
+            raise ValueError('varint')
+          def parse(b):
+            hs=struct.unpack_from('<I',b,4)[0]; q=8+hs
+            if b[q:q+4]!=b'FLdt':raise ValueError('FLdt')
+            ds=struct.unpack_from('<I',b,q+4)[0];cur=q+8;end=cur+ds;ev=[];major=None
+            while cur<end:
+              s=cur;eid=b[cur];cur+=1
+              if eid==0xac:n=4 if major is None or major<25 else 3
+              elif eid<64:n=1
+              elif eid<128:n=2
+              elif eid<192:n=4
+              else:n,cur=vi(b,cur)
+              ps=cur;pe=cur+n;pay=bytes(b[ps:pe]);ev.append((eid,s,ps,pe,pay))
+              if eid==0xc7:
+                m=re.match(rb'\s*(\d+)',pay.rstrip(b'\0'))
+                if m:major=int(m.group(1))
+              cur=pe
+            return ev
+          src=Path(os.environ['W08_SOURCE']); out=Path(os.environ['W08_OUT']); original=src.read_bytes(); sh=hashlib.sha256(original).hexdigest()
+          if sh!=EXPECTED:raise SystemExit(f'source changed {sh}')
+          ev=parse(original); flags=[(i,e) for i,e in enumerate(ev) if e[0]==236]
+          if len(flags)!=18:raise SystemExit(f'flags groups {len(flags)}')
+          event_index,e=flags[1]; ps=e[2]; pay=e[4]; width=min(4,len(pay)-4); before=int.from_bytes(pay[4:4+width],'little')
+          manifest={'source_sha256':sh,'source_bytes':len(original),'source_events':len(ev),'group_index':1,'flags_event_index':event_index,'flags_byte_offset':ps+4,'raw_before':before,'raw_before_hex':hex(before),'variants':[]}
+          for name,mask in FLAGS.items():
+            b=bytearray(original); after=before^mask; b[ps+4:ps+4+width]=after.to_bytes(width,'little'); data=bytes(b)
+            dif=[i for i,(a,c) in enumerate(zip(original,data)) if a!=c]
+            p=out/f'variant-{name}.flp';p.write_bytes(data)
+            manifest['variants'].append({'name':name,'mask':mask,'mask_hex':hex(mask),'raw_after':after,'raw_after_hex':hex(after),'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'changed_byte_offsets':dif,'changed_byte_count':len(dif),'was_set_before':bool(before&mask),'set_after':bool(after&mask)})
+          (out/'matrix-build.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          '@ | Set-Content -Encoding UTF8 "$out\build.py"
+          python "$out\build.py"
+          "SOURCE_FLP=$env:W08_SOURCE"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Observe control and every one-bit variant in untouched FL64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class W08Mouse {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int X,int Y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint f,uint dx,uint dy,uint data,UIntPtr extra);
+          }
+          '@
+          $out="$env:RUNNER_TEMP\w08flags";$fl=$env:FL64_PATH
+          function Shot([string]$path){$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;$bm=New-Object System.Drawing.Bitmap $b.Width,$b.Height;$g=[System.Drawing.Graphics]::FromImage($bm);$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);$bm.Save($path,[System.Drawing.Imaging.ImageFormat]::Png);$g.Dispose();$bm.Dispose()}
+          function ClickAt([int]$x,[int]$y){[void][W08Mouse]::SetCursorPos($x,$y);Start-Sleep -Milliseconds 250;[W08Mouse]::mouse_event(2,0,0,0,[UIntPtr]::Zero);[W08Mouse]::mouse_event(4,0,0,0,[UIntPtr]::Zero)}
+          function Probe([string]$label,[string]$project){
+            Get-Process FL64 -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;Start-Sleep 2
+            $before=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant();$p=Start-Process -FilePath $fl -ArgumentList ('"'+$project+'"') -PassThru;Start-Sleep 15;$p.Refresh()
+            $ws=New-Object -ComObject WScript.Shell;[void]$ws.AppActivate($p.Id);Start-Sleep 1;[System.Windows.Forms.SendKeys]::SendWait('{ENTER}');Start-Sleep 4
+            [void]$ws.AppActivate($p.Id);[System.Windows.Forms.SendKeys]::SendWait('{F9}');Start-Sleep 3
+            # Select Insert 1 on the known 1024x768 hosted surface; if layout moved, the full screenshot still preserves the result.
+            ClickAt 515 355;Start-Sleep 2;$p.Refresh();Shot "$out\$label-mixer-selected.png"
+            $after=(Get-FileHash -Algorithm SHA256 $project).Hash.ToLowerInvariant()
+            [ordered]@{label=$label;project=$project;pid=$p.Id;title=$p.MainWindowTitle;responding=$p.Responding;exited=$p.HasExited;sha256_before=$before;sha256_after=$after;unchanged=($before -eq $after)}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 "$out\$label-runtime.json"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue;Start-Sleep 2
+          }
+          Probe 'control' $env:SOURCE_FLP
+          $m=Get-Content "$out\matrix-build.json" -Raw|ConvertFrom-Json
+          foreach($v in $m.variants){Probe $v.name "$out\variant-$($v.name).flp"}
+
+      - name: Summarise runtime matrix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$out="$env:RUNNER_TEMP\w08flags";$m=Get-Content "$out\matrix-build.json" -Raw|ConvertFrom-Json;$rows=@()
+          foreach($name in @('control')+@($m.variants.name)){$r=Get-Content "$out\$name-runtime.json" -Raw|ConvertFrom-Json;$rows+=[ordered]@{name=$name;title=$r.title;responding=[bool]$r.responding;exited=[bool]$r.exited;unchanged=[bool]$r.unchanged;sha256=$r.sha256_before}}
+          [ordered]@{schema='worker08.native-insertflags-visual-matrix.v1';source_sha256=$m.source_sha256;raw_before=$m.raw_before;variants=$m.variants;runtime=$rows;all_project_bytes_unchanged=(@($rows|Where-Object{-not $_.unchanged}).Count -eq 0)}|ConvertTo-Json -Depth 8|Set-Content -Encoding UTF8 "$out\matrix-verdict.json"
+
+      - name: Remove project binaries before evidence upload
+        shell: pwsh
+        run: |
+          Remove-Item -Force "$env:RUNNER_TEMP\w08flags\*.flp" -ErrorAction SilentlyContinue
+
+      - name: Upload compact matrix evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker08-native-insertflags-visual-matrix
+          path: ${{ runner.temp }}/w08flags
+          compression-level: 6
+          retention-days: 2
+          if-no-files-found: error
