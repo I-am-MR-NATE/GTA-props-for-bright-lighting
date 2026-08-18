@@ -39,3 +39,5 @@ jobs:
           compression-level: 1
           retention-days: 1
           if-no-files-found: error
+
+# FLP122 disposable ferry retrigger: 2026-08-18
