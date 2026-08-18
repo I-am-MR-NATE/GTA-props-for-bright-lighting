@@ -1,0 +1,1 @@
+worker08 native project-plugin observation trigger 2026-08-18
