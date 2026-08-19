@@ -1,0 +1,71 @@
+name: FLP Public Ferry Remediation
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/flp-public-remediation.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Cancel FLP public acquisition runs and remove public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          repo="$GITHUB_REPOSITORY"
+          self="$GITHUB_RUN_ID"
+          # Cancel every other live FLP Armoury public acquisition run in this repo.
+          gh run list --repo "$repo" --limit 100 --json databaseId,name,status \
+            --jq '.[] | select((.name|startswith("FLP Armoury Public Bulk Acquisition")) and (.status=="queued" or .status=="in_progress")) | .databaseId' \
+            | while read -r id; do
+                [ -n "$id" ] || continue
+                [ "$id" = "$self" ] && continue
+                gh run cancel "$id" --repo "$repo" || true
+              done
+          # Wait briefly for cancellation to settle before deleting the release.
+          for n in $(seq 1 30); do
+            live="$(gh run list --repo "$repo" --limit 100 --json databaseId,name,status \
+              --jq '[.[] | select((.name|startswith("FLP Armoury Public Bulk Acquisition")) and (.status=="queued" or .status=="in_progress"))] | length')"
+            [ "$live" = "0" ] && break
+            sleep 5
+          done
+          gh release delete 'flp-armoury-public-bulk-20260819' --repo "$repo" --cleanup-tag -y 2>/dev/null || true
+      - name: Remove FLP public ferry surfaces from live tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull --rebase origin master
+          rm -f .github/workflows/flp-armoury-public-bulk.yml \
+                .github/workflows/flp-armoury-public-bulk-fixed.yml \
+                .flp-armoury-public-bulk-trigger \
+                .flp-armoury-public-bulk-fixed-trigger \
+                ARMOURY_RECEIPTS/FLP_ARMOURY_PUBLIC_BULK_LATEST.json
+          git add -A
+          git commit -m 'Retire accidental FLP public ferry surfaces' || true
+          git push
+      - name: Verify public release absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view 'flp-armoury-public-bulk-20260819' --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'public FLP release still exists' >&2
+            exit 1
+          fi
+          echo 'PUBLIC_FLP_RELEASE_ABSENT=1'
