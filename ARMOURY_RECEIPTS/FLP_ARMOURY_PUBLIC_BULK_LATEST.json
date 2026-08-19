@@ -15,6 +15,11 @@
       "name": "armoury-public-windows.tar.zst.sha256",
       "size": 105,
       "url": "https://github.com/I-am-MR-NATE/GTA-props-for-bright-lighting/releases/download/flp-armoury-public-bulk-20260819/armoury-public-windows.tar.zst.sha256"
+    },
+    {
+      "name": "FLP_ARMOURY_PUBLIC_BULK_LATEST.json",
+      "size": 1370,
+      "url": "https://github.com/I-am-MR-NATE/GTA-props-for-bright-lighting/releases/download/flp-armoury-public-bulk-20260819/FLP_ARMOURY_PUBLIC_BULK_LATEST.json"
     }
   ],
   "jobs": {
