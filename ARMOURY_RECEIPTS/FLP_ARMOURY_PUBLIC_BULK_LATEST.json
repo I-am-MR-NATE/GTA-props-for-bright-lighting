@@ -1,0 +1,36 @@
+{
+  "all_public_jobs_success": false,
+  "assets": [
+    {
+      "name": "armoury-public-windows.parts.sha256",
+      "size": 113,
+      "url": "https://github.com/I-am-MR-NATE/GTA-props-for-bright-lighting/releases/download/flp-armoury-public-bulk-20260819/armoury-public-windows.parts.sha256"
+    },
+    {
+      "name": "armoury-public-windows.tar.zst.part000",
+      "size": 299817107,
+      "url": "https://github.com/I-am-MR-NATE/GTA-props-for-bright-lighting/releases/download/flp-armoury-public-bulk-20260819/armoury-public-windows.tar.zst.part000"
+    },
+    {
+      "name": "armoury-public-windows.tar.zst.sha256",
+      "size": 105,
+      "url": "https://github.com/I-am-MR-NATE/GTA-props-for-bright-lighting/releases/download/flp-armoury-public-bulk-20260819/armoury-public-windows.tar.zst.sha256"
+    }
+  ],
+  "jobs": {
+    "analysis_public": "failure",
+    "audio_compat": "failure",
+    "audio_main": "failure",
+    "builder_python": "failure",
+    "windows_public": "success"
+  },
+  "private_cargo_not_published": [
+    "private MEGA_DAN_TOOLBELT/FLP_BUILDER source (already in private GitHub North Star)",
+    "FL Studio installer",
+    "prepared/licensed FL Studio prefix"
+  ],
+  "release_tag": "flp-armoury-public-bulk-20260819",
+  "run_id": "32248624360",
+  "schema": "mega-dan.flp-armoury-public-bulk.v1",
+  "scope": "public/open-source cargo only"
+}
