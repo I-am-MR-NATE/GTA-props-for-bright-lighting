@@ -20,23 +20,12 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq zstd ca-certificates
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd ca-certificates
           mkdir -p _py _wheelhouse _parts _meta
           retry(){ curl --fail --location --retry 7 --retry-all-errors --connect-timeout 30 --max-time 7200 "$@"; }
 
-          pyurl=''
-          for page in 1 2 3 4 5; do
-            pyurl="$(retry "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=100&page=$page" | jq -r '[.[]|.assets[]|select((.name|startswith("cpython-3.14.7+")) and (.name|endswith("-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz")))|.browser_download_url][0]//empty')"
-            [[ -n "$pyurl" ]] && break
-          done
-          if [[ -z "$pyurl" ]]; then
-            for page in 1 2 3 4 5; do
-              pyurl="$(retry "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=100&page=$page" | jq -r '[.[]|.assets[]|select((.name|startswith("cpython-3.14.7+")) and (.name|endswith("-x86_64-unknown-linux-gnu-install_only.tar.gz")))|.browser_download_url][0]//empty')"
-              [[ -n "$pyurl" ]] && break
-            done
-          fi
-          [[ -n "$pyurl" ]]
-          retry "$pyurl" -o _py/python.tar.gz
+          PYURL='https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          retry "$PYURL" -o _py/python.tar.gz
           mkdir -p _py/extract
           tar -xzf _py/python.tar.gz -C _py/extract
           PY="$PWD/_py/extract/python/bin/python3"
@@ -44,13 +33,10 @@ jobs:
           "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
           "$PY" -m pip install --upgrade pip setuptools wheel >/dev/null
 
-          # Exact matched CPU Torch family first; later dependency resolution may consume these local wheels.
           "$PY" -m pip download --dest _wheelhouse --index-url https://download.pytorch.org/whl/cpu 'torch==2.11.0' 'torchaudio==2.11.0'
           TORCH_WHEEL="$(find _wheelhouse -maxdepth 1 -type f -name 'torch-2.11.0*whl' -print -quit)"
           AUDIO_WHEEL="$(find _wheelhouse -maxdepth 1 -type f -name 'torchaudio-2.11.0*whl' -print -quit)"
           [[ -s "$TORCH_WHEEL" && -s "$AUDIO_WHEEL" ]]
-
-          # Pin the exact Torch family so Demucs cannot drag a second incompatible Torch build from PyPI.
           cat > _meta/constraints.txt <<'EOF'
           torch==2.11.0+cpu
           torchaudio==2.11.0+cpu
@@ -74,8 +60,7 @@ jobs:
           sha256sum _wheelhouse/* | sort -k2 > _meta/WHEEL_SHA256SUMS.txt
           find _wheelhouse -maxdepth 1 -type f -printf '%f %s\n' | sort > _meta/WHEEL_SIZES.txt
           printf 'python=3.14.7\ntorch=2.11.0\ntorchaudio=2.11.0\ndemucs=4.1.0\nessentia_tensorflow=2.1b6.dev1438\nopensmile=2.6.0\n' > _meta/VERSIONS.txt
-          printf '%s\n' "$pyurl" > _meta/PYTHON_SOURCE_URL.txt
-
+          printf '%s\n' "$PYURL" > _meta/PYTHON_SOURCE_URL.txt
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf _meta/wheelhouse.tar _wheelhouse _meta/WHEEL_SHA256SUMS.txt _meta/WHEEL_SIZES.txt _meta/VERSIONS.txt _meta/PYTHON_SOURCE_URL.txt
           sha256sum _meta/wheelhouse.tar > _meta/FULL_SHA256SUMS.txt
           split -b 240M -d -a 2 _meta/wheelhouse.tar _parts/wheelhouse.part.
@@ -92,7 +77,6 @@ jobs:
           compression-level: 1
           retention-days: 1
           if-no-files-found: error
-
       - name: Upload parts
         uses: actions/upload-artifact@v4
         with:
