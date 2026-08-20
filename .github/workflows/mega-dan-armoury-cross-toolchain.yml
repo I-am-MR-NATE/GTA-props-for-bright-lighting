@@ -51,7 +51,8 @@ jobs:
           set -eu
           ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
           export LD_LIBRARY_PATH="$ROOT/host-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          exec "$ROOT/usr/bin/$1" "${@:2}"
+          tool="$1"; shift
+          exec "$ROOT/usr/bin/$tool" "$@"
           SH
           chmod +x _stage/mingw/run
           cat > /tmp/hello.c <<'C'
@@ -89,7 +90,7 @@ jobs:
           find _stage -type f -printf '%p %s\n' | sort > _meta/STAGE_FILES.txt
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C _stage -cf _meta/cross-toolchain.tar .
           sha256sum _meta/cross-toolchain.tar > _meta/FULL_SHA256SUMS.txt
-          split -b 240M -d -a 2 _meta/cross-toolchain.tar _parts/cross-toolchain.part.
+          split -b 400M -d -a 2 _meta/cross-toolchain.tar _parts/cross-toolchain.part.
           sha256sum _parts/* | sort -k2 > _meta/PART_SHA256SUMS.txt
           find _parts -type f -printf '%f %s\n' | sort > _meta/PART_SIZES.txt
           find _parts -type f -printf '%f\n' | sort > _meta/PART_ORDER.txt
