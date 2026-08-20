@@ -23,8 +23,6 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd xz-utils unzip file ca-certificates
           mkdir -p _cargo _parts _meta _py
           retry(){ curl --fail --location --retry 7 --retry-all-errors --connect-timeout 30 --max-time 7200 "$@"; }
-
-          # Exact direct asset: avoid the GitHub release-API lookup wall.
           PYURL='https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
           retry "$PYURL" -o _py/python.tar.gz
           mkdir -p _py/extract
@@ -46,8 +44,6 @@ jobs:
           _cargo/flpdiff-v0.1.2-linux-x64 --help >/dev/null
           retry 'https://sonicvisualiser.org/pre/sonic-annotator-1.7.0-linux64-static.tar.gz' -o _cargo/sonic-annotator-1.7.0-linux64-static.tar.gz
           tar -tzf _cargo/sonic-annotator-1.7.0-linux64-static.tar.gz >/dev/null
-          retry 'https://code.soundsoftware.ac.uk/attachments/download/2625/qm-vamp-plugins-1.8.0-linux64.tar.gz' -o _cargo/qm-vamp-plugins-1.8.0-linux64.tar.gz
-          tar -tzf _cargo/qm-vamp-plugins-1.8.0-linux64.tar.gz >/dev/null
           retry 'https://go.dev/dl/go1.23.2.linux-amd64.tar.gz' -o _cargo/go1.23.2.linux-amd64.tar.gz
           tar -tzf _cargo/go1.23.2.linux-amd64.tar.gz >/dev/null
           retry 'https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.xz' -o _cargo/node-v22.16.0-linux-x64.tar.xz
@@ -55,7 +51,7 @@ jobs:
 
           sha256sum _cargo/* | sort -k2 > _meta/CARGO_SHA256SUMS.txt
           find _cargo -maxdepth 1 -type f -printf '%f %s\n' | sort > _meta/CARGO_SIZES.txt
-          printf 'python=3.14.7\nwine_x86=11.0\nghidra=12.1.2\npluginval=1.0.4\nflpdiff=0.1.2\nsonic_annotator=1.7.0\nqm_vamp=1.8.0\ngo=1.23.2\nnode=22.16.0\n' > _meta/VERSIONS.txt
+          printf 'python=3.14.7\nwine_x86=11.0\nghidra=12.1.2\npluginval=1.0.4\nflpdiff=0.1.2\nsonic_annotator=1.7.0\nqm_vamp=SEPARATE_SOURCE_BUILD\ngo=1.23.2\nnode=22.16.0\n' > _meta/VERSIONS.txt
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf _meta/public-tranche.tar _cargo _meta/CARGO_SHA256SUMS.txt _meta/CARGO_SIZES.txt _meta/VERSIONS.txt _meta/PYTHON_SOURCE_URL.txt
           sha256sum _meta/public-tranche.tar > _meta/FULL_SHA256SUMS.txt
           split -b 240M -d -a 2 _meta/public-tranche.tar _parts/public-tranche.part.
