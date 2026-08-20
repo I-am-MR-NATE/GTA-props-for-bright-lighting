@@ -1,0 +1,110 @@
+name: MEGA DAN Armoury Public Tranche
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/mega-dan-armoury-public-tranche.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Acquire exact public Armoury tranche
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd xz-utils unzip file ca-certificates
+          mkdir -p _cargo _parts _meta _py
+          retry(){ curl --fail --location --retry 7 --retry-all-errors --connect-timeout 30 --max-time 7200 "$@"; }
+          PYURL='https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          retry "$PYURL" -o _py/python.tar.gz
+          mkdir -p _py/extract
+          tar -xzf _py/python.tar.gz -C _py/extract
+          [[ "$(_py/extract/python/bin/python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')" == 3.14.7 ]]
+          _py/extract/python/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C _py/extract -cf - python | zstd -T0 -15 -q -o _cargo/python-3.14.7-runtime.tar.zst
+          printf '%s\n' "$PYURL" > _meta/PYTHON_SOURCE_URL.txt
+
+          retry 'https://github.com/Kron4ek/Wine-Builds/releases/download/11.0/wine-11.0-x86.tar.xz' -o _cargo/wine-11.0-x86.tar.xz
+          tar -tJf _cargo/wine-11.0-x86.tar.xz >/dev/null
+          retry 'https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip' -o _cargo/ghidra_12.1.2_PUBLIC_20260605.zip
+          echo 'b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d  _cargo/ghidra_12.1.2_PUBLIC_20260605.zip' | sha256sum -c --strict
+          unzip -tq _cargo/ghidra_12.1.2_PUBLIC_20260605.zip >/dev/null
+          retry 'https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Linux.zip' -o _cargo/pluginval_1.0.4_Linux.zip
+          unzip -tq _cargo/pluginval_1.0.4_Linux.zip >/dev/null
+          retry 'https://github.com/dawhubapp/flpdiff/releases/download/v0.1.2/flpdiff-linux-x64' -o _cargo/flpdiff-v0.1.2-linux-x64
+          chmod +x _cargo/flpdiff-v0.1.2-linux-x64
+          _cargo/flpdiff-v0.1.2-linux-x64 --help >/dev/null
+          retry 'https://sonicvisualiser.org/pre/sonic-annotator-1.7.0-linux64-static.tar.gz' -o _cargo/sonic-annotator-1.7.0-linux64-static.tar.gz
+          tar -tzf _cargo/sonic-annotator-1.7.0-linux64-static.tar.gz >/dev/null
+          retry 'https://go.dev/dl/go1.23.2.linux-amd64.tar.gz' -o _cargo/go1.23.2.linux-amd64.tar.gz
+          tar -tzf _cargo/go1.23.2.linux-amd64.tar.gz >/dev/null
+          retry 'https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.xz' -o _cargo/node-v22.16.0-linux-x64.tar.xz
+          tar -tJf _cargo/node-v22.16.0-linux-x64.tar.xz >/dev/null
+
+          sha256sum _cargo/* | sort -k2 > _meta/CARGO_SHA256SUMS.txt
+          find _cargo -maxdepth 1 -type f -printf '%f %s\n' | sort > _meta/CARGO_SIZES.txt
+          printf 'python=3.14.7\nwine_x86=11.0\nghidra=12.1.2\npluginval=1.0.4\nflpdiff=0.1.2\nsonic_annotator=1.7.0\nqm_vamp=SEPARATE_SOURCE_BUILD\ngo=1.23.2\nnode=22.16.0\n' > _meta/VERSIONS.txt
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf _meta/public-tranche.tar _cargo _meta/CARGO_SHA256SUMS.txt _meta/CARGO_SIZES.txt _meta/VERSIONS.txt _meta/PYTHON_SOURCE_URL.txt
+          sha256sum _meta/public-tranche.tar > _meta/FULL_SHA256SUMS.txt
+          split -b 240M -d -a 2 _meta/public-tranche.tar _parts/public-tranche.part.
+          find _parts -maxdepth 1 -type f -printf '%f %s\n' | sort > _meta/PART_SIZES.txt
+          sha256sum _parts/* | sort -k2 > _meta/PART_SHA256SUMS.txt
+          find _parts -maxdepth 1 -type f -printf '%f\n' | sort > _meta/PART_ORDER.txt
+          rm -f _meta/public-tranche.tar
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-public-tranche-meta
+          path: _meta
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-public-tranche-part-00
+          path: _parts/public-tranche.part.00
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 01
+        if: ${{ hashFiles('_parts/public-tranche.part.01') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-public-tranche-part-01
+          path: _parts/public-tranche.part.01
+          compression-level: 0
+          retention-days: 1
+      - name: Upload part 02
+        if: ${{ hashFiles('_parts/public-tranche.part.02') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-public-tranche-part-02
+          path: _parts/public-tranche.part.02
+          compression-level: 0
+          retention-days: 1
+      - name: Upload part 03
+        if: ${{ hashFiles('_parts/public-tranche.part.03') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-public-tranche-part-03
+          path: _parts/public-tranche.part.03
+          compression-level: 0
+          retention-days: 1
+      - name: Upload part 04
+        if: ${{ hashFiles('_parts/public-tranche.part.04') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-public-tranche-part-04
+          path: _parts/public-tranche.part.04
+          compression-level: 0
+          retention-days: 1
