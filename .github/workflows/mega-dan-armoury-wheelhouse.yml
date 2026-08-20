@@ -1,0 +1,108 @@
+name: MEGA DAN Armoury Wheelhouse Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/mega-dan-armoury-wheelhouse.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Build exact CPython 3.14.7 offline wheelhouse
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd ca-certificates
+          mkdir -p _py _wheelhouse _parts _meta
+          retry(){ curl --fail --location --retry 7 --retry-all-errors --connect-timeout 30 --max-time 7200 "$@"; }
+          PYURL='https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          retry "$PYURL" -o _py/python.tar.gz
+          mkdir -p _py/extract
+          tar -xzf _py/python.tar.gz -C _py/extract
+          PY="$PWD/_py/extract/python/bin/python3"
+          [[ "$($PY -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')" == 3.14.7 ]]
+          "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+          "$PY" -m pip install --upgrade pip setuptools wheel >/dev/null
+          "$PY" -m pip download --dest _wheelhouse --index-url https://download.pytorch.org/whl/cpu 'torch==2.11.0' 'torchaudio==2.11.0'
+          TORCH_WHEEL="$(find _wheelhouse -maxdepth 1 -type f -name 'torch-2.11.0*whl' -print -quit)"
+          AUDIO_WHEEL="$(find _wheelhouse -maxdepth 1 -type f -name 'torchaudio-2.11.0*whl' -print -quit)"
+          [[ -s "$TORCH_WHEEL" && -s "$AUDIO_WHEEL" ]]
+          cat > _meta/constraints.txt <<'EOF'
+          torch==2.11.0+cpu
+          torchaudio==2.11.0+cpu
+          EOF
+          "$PY" -m pip download --dest _wheelhouse --find-links _wheelhouse -c _meta/constraints.txt \
+            'luaparser>=3.3.1,<4' 'mido>=1.3.3,<2' 'pedalboard>=0.9.24,<0.10' \
+            'pefile>=2024.8.26,<2025' 'psutil>=6.1,<8' 'packaging>=24' \
+            pyflp construct kaitaistruct capstone unicorn lief \
+            numpy scipy soundfile librosa pyloudnorm pretty_midi \
+            onnxruntime transformers huggingface_hub accelerate 'opensmile==2.6.0' \
+            'demucs==4.1.0' 'essentia-tensorflow==2.1b6.dev1438'
+          python3 - <<'PY'
+          from pathlib import Path
+          names=[p.name.lower().replace('_','-') for p in Path('_wheelhouse').iterdir() if p.is_file()]
+          required=['torch-2.11.0','torchaudio-2.11.0','demucs-4.1.0','essentia-tensorflow-2.1b6.dev1438','opensmile-2.6.0','pyflp-','lief-','onnxruntime-','transformers-']
+          missing=[x for x in required if not any(n.startswith(x) for n in names)]
+          assert not missing, missing
+          print('WHEELHOUSE_REQUIRED_DISTRIBUTIONS_PASS',len(names))
+          PY
+          sha256sum _wheelhouse/* | sort -k2 > _meta/WHEEL_SHA256SUMS.txt
+          find _wheelhouse -maxdepth 1 -type f -printf '%f %s\n' | sort > _meta/WHEEL_SIZES.txt
+          printf 'python=3.14.7\ntorch=2.11.0\ntorchaudio=2.11.0\ndemucs=4.1.0\nessentia_tensorflow=2.1b6.dev1438\nopensmile=2.6.0\n' > _meta/VERSIONS.txt
+          printf '%s\n' "$PYURL" > _meta/PYTHON_SOURCE_URL.txt
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf _meta/wheelhouse.tar _wheelhouse _meta/WHEEL_SHA256SUMS.txt _meta/WHEEL_SIZES.txt _meta/VERSIONS.txt _meta/PYTHON_SOURCE_URL.txt
+          sha256sum _meta/wheelhouse.tar > _meta/FULL_SHA256SUMS.txt
+          split -b 240M -d -a 2 _meta/wheelhouse.tar _parts/wheelhouse.part.
+          sha256sum _parts/* | sort -k2 > _meta/PART_SHA256SUMS.txt
+          find _parts -maxdepth 1 -type f -printf '%f %s\n' | sort > _meta/PART_SIZES.txt
+          find _parts -maxdepth 1 -type f -printf '%f\n' | sort > _meta/PART_ORDER.txt
+          rm -f _meta/wheelhouse.tar
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-meta
+          path: _meta
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-00
+          path: _parts/wheelhouse.part.00
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-01
+          path: _parts/wheelhouse.part.01
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-02
+          path: _parts/wheelhouse.part.02
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 03
+        if: ${{ hashFiles('_parts/wheelhouse.part.03') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-03
+          path: _parts/wheelhouse.part.03
+          compression-level: 0
+          retention-days: 1
