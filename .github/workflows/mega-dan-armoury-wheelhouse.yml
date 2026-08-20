@@ -23,7 +23,6 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd ca-certificates
           mkdir -p _py _wheelhouse _parts _meta
           retry(){ curl --fail --location --retry 7 --retry-all-errors --connect-timeout 30 --max-time 7200 "$@"; }
-
           PYURL='https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
           retry "$PYURL" -o _py/python.tar.gz
           mkdir -p _py/extract
@@ -32,7 +31,6 @@ jobs:
           [[ "$($PY -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')" == 3.14.7 ]]
           "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
           "$PY" -m pip install --upgrade pip setuptools wheel >/dev/null
-
           "$PY" -m pip download --dest _wheelhouse --index-url https://download.pytorch.org/whl/cpu 'torch==2.11.0' 'torchaudio==2.11.0'
           TORCH_WHEEL="$(find _wheelhouse -maxdepth 1 -type f -name 'torch-2.11.0*whl' -print -quit)"
           AUDIO_WHEEL="$(find _wheelhouse -maxdepth 1 -type f -name 'torchaudio-2.11.0*whl' -print -quit)"
@@ -48,7 +46,6 @@ jobs:
             numpy scipy soundfile librosa pyloudnorm pretty_midi \
             onnxruntime transformers huggingface_hub accelerate 'opensmile==2.6.0' \
             'demucs==4.1.0' 'essentia-tensorflow==2.1b6.dev1438'
-
           python3 - <<'PY'
           from pathlib import Path
           names=[p.name.lower().replace('_','-') for p in Path('_wheelhouse').iterdir() if p.is_file()]
@@ -77,11 +74,35 @@ jobs:
           compression-level: 1
           retention-days: 1
           if-no-files-found: error
-      - name: Upload parts
+      - name: Upload part 00
         uses: actions/upload-artifact@v4
         with:
-          name: armoury-wheelhouse-parts
-          path: _parts
+          name: armoury-wheelhouse-part-00
+          path: _parts/wheelhouse.part.00
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-01
+          path: _parts/wheelhouse.part.01
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-02
+          path: _parts/wheelhouse.part.02
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 03
+        if: ${{ hashFiles('_parts/wheelhouse.part.03') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-wheelhouse-part-03
+          path: _parts/wheelhouse.part.03
+          compression-level: 0
+          retention-days: 1
