@@ -1,0 +1,145 @@
+name: MEGA DAN Armoury Cross Toolchain Ferry
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/mega-dan-armoury-cross-toolchain.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ferry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Build portable MinGW QEMU and Rust Windows targets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 binutils-mingw-w64-i686 \
+            mingw-w64-x86-64-dev mingw-w64-i686-dev mingw-w64-common \
+            qemu-user qemu-user-static libc6:i386 libgcc-s1:i386 libfreetype6:i386 zlib1g:i386 \
+            libpng16-16t64:i386 libbz2-1.0:i386 libbrotli1:i386 libzstd1:i386 zstd xz-utils ca-certificates
+          mkdir -p _stage/mingw/usr/bin _stage/mingw/usr/lib/gcc _stage/mingw/usr/libexec/gcc _stage/mingw/host-lib \
+                   _stage/qemu/sysroot/lib _stage/qemu/sysroot/usr/lib _stage/rust-targets/lib/rustlib _parts _meta
+
+          for trip in x86_64-w64-mingw32 i686-w64-mingw32; do
+            cp -aL "/usr/$trip" "_stage/mingw/usr/$trip"
+            cp -aL "/usr/lib/gcc/$trip" "_stage/mingw/usr/lib/gcc/$trip"
+            if [[ -d "/usr/libexec/gcc/$trip" ]]; then cp -aL "/usr/libexec/gcc/$trip" "_stage/mingw/usr/libexec/gcc/$trip"; fi
+            while IFS= read -r src; do cp -aL "$src" "_stage/mingw/usr/bin/$(basename "$src")"; done < <(find /usr/bin -maxdepth 1 \( -name "$trip-*" -o -name "$trip.*" \) -print | sort)
+          done
+          while IFS= read -r exe; do
+            ldd "$exe" 2>/dev/null | awk '/=> \/|^[[:space:]]*\// {for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}' | sed 's/[()]//g' || true
+          done < <(find _stage/mingw/usr/bin _stage/mingw/usr/lib/gcc _stage/mingw/usr/libexec/gcc -type f -perm /111 -print 2>/dev/null) \
+            | sort -u | while read -r lib; do
+                [[ -f "$lib" ]] || continue
+                real="$(readlink -f "$lib")"; base="$(basename "$lib")"; rbase="$(basename "$real")"
+                [[ -e "_stage/mingw/host-lib/$rbase" ]] || cp -a "$real" "_stage/mingw/host-lib/$rbase"
+                [[ "$base" == "$rbase" ]] || ln -sfn "$rbase" "_stage/mingw/host-lib/$base"
+              done
+
+          cat > _stage/mingw/run <<'SH'
+          #!/bin/sh
+          set -eu
+          ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+          export LD_LIBRARY_PATH="$ROOT/host-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$ROOT/usr/bin/$1" "${@:2}"
+          SH
+          chmod +x _stage/mingw/run
+          cat > /tmp/hello.c <<'C'
+          #include <windows.h>
+          int main(void){return 0;}
+          C
+          LD_LIBRARY_PATH="$PWD/_stage/mingw/host-lib" _stage/mingw/usr/bin/x86_64-w64-mingw32-gcc /tmp/hello.c -o /tmp/hello-x64.exe
+          LD_LIBRARY_PATH="$PWD/_stage/mingw/host-lib" _stage/mingw/usr/bin/i686-w64-mingw32-gcc /tmp/hello.c -o /tmp/hello-x86.exe
+          file /tmp/hello-x64.exe /tmp/hello-x86.exe | tee _meta/MINGW_COMPILE_FILE.txt
+          grep -q 'PE32+ executable' _meta/MINGW_COMPILE_FILE.txt
+          grep -q 'PE32 executable' _meta/MINGW_COMPILE_FILE.txt
+
+          QEMU="$(command -v qemu-i386-static || command -v qemu-i386)"
+          cp -aL "$QEMU" _stage/qemu/qemu-i386
+          chmod +x _stage/qemu/qemu-i386
+          _stage/qemu/qemu-i386 --version | tee _meta/QEMU_VERSION.txt
+          for src in /lib/i386-linux-gnu /usr/lib/i386-linux-gnu; do
+            [[ -d "$src" ]] || continue
+            mkdir -p "_stage/qemu/sysroot$(dirname "$src")"
+            cp -aL "$src" "_stage/qemu/sysroot$(dirname "$src")/"
+          done
+          [[ ! -e /lib/ld-linux.so.2 ]] || cp -aL /lib/ld-linux.so.2 _stage/qemu/sysroot/lib/ld-linux.so.2
+          [[ -e _stage/qemu/sysroot/lib/ld-linux.so.2 || -e _stage/qemu/sysroot/lib/i386-linux-gnu/ld-linux.so.2 ]]
+
+          if ! command -v rustup >/dev/null 2>&1; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; export PATH="$HOME/.cargo/bin:$PATH"; fi
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup target add --toolchain 1.97.1 x86_64-pc-windows-gnu i686-pc-windows-gnu
+          HOST="$(rustup run 1.97.1 rustc -vV | sed -n 's/^host: //p')"
+          TC="$HOME/.rustup/toolchains/1.97.1-$HOST"
+          cp -aL "$TC/lib/rustlib/x86_64-pc-windows-gnu" _stage/rust-targets/lib/rustlib/x86_64-pc-windows-gnu
+          cp -aL "$TC/lib/rustlib/i686-pc-windows-gnu" _stage/rust-targets/lib/rustlib/i686-pc-windows-gnu
+          rustup run 1.97.1 rustc --version | tee _meta/RUST_VERSION.txt
+
+          sha256sum /tmp/hello-x64.exe /tmp/hello-x86.exe > _meta/MINGW_SMOKE_SHA256SUMS.txt
+          find _stage -type f -printf '%p %s\n' | sort > _meta/STAGE_FILES.txt
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C _stage -cf _meta/cross-toolchain.tar .
+          sha256sum _meta/cross-toolchain.tar > _meta/FULL_SHA256SUMS.txt
+          split -b 240M -d -a 2 _meta/cross-toolchain.tar _parts/cross-toolchain.part.
+          sha256sum _parts/* | sort -k2 > _meta/PART_SHA256SUMS.txt
+          find _parts -type f -printf '%f %s\n' | sort > _meta/PART_SIZES.txt
+          find _parts -type f -printf '%f\n' | sort > _meta/PART_ORDER.txt
+          rm -f _meta/cross-toolchain.tar
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-cross-toolchain-meta
+          path: _meta
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-cross-toolchain-part-00
+          path: _parts/cross-toolchain.part.00
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload part 01
+        if: ${{ hashFiles('_parts/cross-toolchain.part.01') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-cross-toolchain-part-01
+          path: _parts/cross-toolchain.part.01
+          compression-level: 0
+          retention-days: 1
+      - name: Upload part 02
+        if: ${{ hashFiles('_parts/cross-toolchain.part.02') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-cross-toolchain-part-02
+          path: _parts/cross-toolchain.part.02
+          compression-level: 0
+          retention-days: 1
+      - name: Upload part 03
+        if: ${{ hashFiles('_parts/cross-toolchain.part.03') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-cross-toolchain-part-03
+          path: _parts/cross-toolchain.part.03
+          compression-level: 0
+          retention-days: 1
+      - name: Upload part 04
+        if: ${{ hashFiles('_parts/cross-toolchain.part.04') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: armoury-cross-toolchain-part-04
+          path: _parts/cross-toolchain.part.04
+          compression-level: 0
+          retention-days: 1
